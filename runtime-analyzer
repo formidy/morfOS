@@ -124,7 +124,6 @@ local StartTime = 0
 local ActivityLog = {}
 local MaliciousActivities = {}
 local NetworkRequests = {}
-local HttpRequests = {}
 local FileOperations = {}
 local KeystrokeLog = {}
 local ChatInterceptions = {}
@@ -188,38 +187,6 @@ local function ShouldBlockActivity(activityType, severity)
     end
     
     return severity >= 9
-end
-
-local function LogHttpRequest(method, url, headers, body, response)
-    SafeCall(function()
-        if not MonitoringActive or not IsExecutorScript() then 
-            return 
-        end
-        
-        local success, callingScript = SafeCall(function()
-            return getcallingscript and getcallingscript() or "Unknown"
-        end, "Getting calling script for HTTP logging")
-        
-        local scriptStr = success and tostring(callingScript) or "Unknown"
-        
-        local httpData = {
-            method = method,
-            url = url,
-            headers = headers,
-            body = body,
-            response = response,
-            timestamp = tick() - StartTime,
-            script = scriptStr,
-            status = response and response.StatusCode or "N/A",
-            response_body = response and response.Body or "N/A",
-            response_headers = response and response.Headers or {}
-        }
-        
-        table.insert(HttpRequests, httpData)
-        table.insert(NetworkRequests, httpData)
-        
-        debugPrint("HTTP Request logged: " .. method .. " -> " .. url, "INFO")
-    end, "HTTP request logging")
 end
 
 -- ═══════════════════════════════════════════════════════════════════════════════
@@ -355,19 +322,30 @@ local function SetupGameServiceHooks()
                         local url = args[1]
                         LogActivity("LEGACY_HTTP_GET", "URL: " .. tostring(url), 5)
                         
-                        local result = originalNamecall(self, ...)
-                        LogHttpRequest("Legacy_HttpGet", url, {}, nil, {Body = result, StatusCode = 200})
+                        table.insert(NetworkRequests, {
+                            method = "Legacy_HttpGet",
+                            url = url,
+                            timestamp = tick() - StartTime,
+                            script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown"),
+                            args = args
+                        })
+                        
                         AnalyzeNetworkRequest("Legacy_HttpGet", url, nil)
-                        return result
                     elseif method == "HttpPost" then
                         local url = args[1]
                         local data = args[2]
                         LogActivity("LEGACY_HTTP_POST", "URL: " .. tostring(url), 6)
                         
-                        local result = originalNamecall(self, ...)
-                        LogHttpRequest("Legacy_HttpPost", url, {}, data, {Body = result, StatusCode = 200})
+                        table.insert(NetworkRequests, {
+                            method = "Legacy_HttpPost",
+                            url = url,
+                            data = data,
+                            timestamp = tick() - StartTime,
+                            script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown"),
+                            args = args
+                        })
+                        
                         AnalyzeNetworkRequest("Legacy_HttpPost", url, data)
-                        return result
                     end
                 end, "Game service hook processing")
             end
@@ -422,43 +400,48 @@ local function SetupHttpServiceHooks()
                     if method == "PostAsync" then
                         local url = args[1]
                         local data = args[2]
-                        local httpType = args[3]
-                        local headers = args[4]
                         LogActivity("HTTP_POST", "URL: " .. tostring(url), 4)
                         
-                        local result = originalNamecall(self, ...)
-                        LogHttpRequest("PostAsync", url, headers, data, {Body = result, StatusCode = 200})
+                        table.insert(NetworkRequests, {
+                            method = "PostAsync",
+                            url = url,
+                            data = data,
+                            timestamp = tick() - StartTime,
+                            script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown"),
+                            args = args
+                        })
+                        
                         AnalyzeNetworkRequest("PostAsync", url, data)
-                        return result
                     elseif method == "GetAsync" then
                         local url = args[1]
-                        local nocache = args[2]
-                        local headers = args[3]
                         LogActivity("HTTP_GET", "URL: " .. tostring(url), 3)
                         
-                        local result = originalNamecall(self, ...)
-                        LogHttpRequest("GetAsync", url, headers, nil, {Body = result, StatusCode = 200})
+                        table.insert(NetworkRequests, {
+                            method = "GetAsync",
+                            url = url,
+                            timestamp = tick() - StartTime,
+                            script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown"),
+                            args = args
+                        })
+                        
                         AnalyzeNetworkRequest("GetAsync", url, nil)
-                        return result
                     elseif method == "RequestAsync" then
                         local requestData = args[1]
                         local url = requestData and (requestData.Url or requestData.url) or "Unknown"
                         local reqMethod = requestData and (requestData.Method or requestData.method) or "Unknown"
-                        local headers = requestData and (requestData.Headers or requestData.headers) or {}
-                        local body = requestData and (requestData.Body or requestData.body)
                         
                         LogActivity("HTTP_REQUEST", reqMethod .. " -> " .. tostring(url), 4)
                         
-                        local result = originalNamecall(self, ...)
-                        LogHttpRequest("RequestAsync_" .. reqMethod, url, headers, body, result)
-                        AnalyzeNetworkRequest("RequestAsync", url, body)
-                        return result
-                    elseif method == "JSONEncode" then
-                        local data = args[1]
-                        LogActivity("JSON_ENCODE", "Encoding data", 1)
-                    elseif method == "JSONDecode" then
-                        local jsonStr = args[1]
-                        LogActivity("JSON_DECODE", "Decoding JSON", 1)
+                        table.insert(NetworkRequests, {
+                            method = "RequestAsync_" .. reqMethod,
+                            url = url,
+                            data = requestData,
+                            timestamp = tick() - StartTime,
+                            script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown"),
+                            args = args
+                        })
+                        
+                        AnalyzeNetworkRequest("RequestAsync", url, requestData and (requestData.Body or requestData.body))
                     end
                 end, "HTTP service hook processing")
             end
@@ -838,21 +821,22 @@ local function SetupRequestHooks()
                         if IsExecutorScript() then
                             local url = "Unknown"
                             local method = "GET"
-                            local headers = {}
-                            local body = nil
                             
                             SafeCall(function()
                                 url = requestData.Url or requestData.url or "Unknown"
                                 method = requestData.Method or requestData.method or "GET"
-                                headers = requestData.Headers or requestData.headers or {}
-                                body = requestData.Body or requestData.body
                                 
                                 LogActivity("REQUEST_FUNCTION", method .. " -> " .. tostring(url), 4)
                                 
-                                local result = OriginalFunctions.request(requestData)
-                                LogHttpRequest("request_" .. method, url, headers, body, result)
-                                AnalyzeNetworkRequest("request", url, body)
-                                return result
+                                table.insert(NetworkRequests, {
+                                    method = "request_" .. method,
+                                    url = url,
+                                    data = requestData,
+                                    timestamp = tick() - StartTime,
+                                    script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown")
+                                })
+                                
+                                AnalyzeNetworkRequest("request", url, requestData.Body or requestData.body)
                             end, "Request function logging")
                         end
                         return OriginalFunctions.request(requestData)
@@ -869,21 +853,22 @@ local function SetupRequestHooks()
                         if IsExecutorScript() then
                             local url = "Unknown"
                             local method = "GET"
-                            local headers = {}
-                            local body = nil
                             
                             SafeCall(function()
                                 url = requestData.Url or requestData.url or "Unknown"
                                 method = requestData.Method or requestData.method or "GET"
-                                headers = requestData.Headers or requestData.headers or {}
-                                body = requestData.Body or requestData.body
                                 
                                 LogActivity("HTTP_REQUEST_FUNCTION", method .. " -> " .. tostring(url), 4)
                                 
-                                local result = OriginalFunctions.http_request(requestData)
-                                LogHttpRequest("http_request_" .. method, url, headers, body, result)
-                                AnalyzeNetworkRequest("http_request", url, body)
-                                return result
+                                table.insert(NetworkRequests, {
+                                    method = "http_request_" .. method,
+                                    url = url,
+                                    data = requestData,
+                                    timestamp = tick() - StartTime,
+                                    script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown")
+                                })
+                                
+                                AnalyzeNetworkRequest("http_request", url, requestData.Body or requestData.body)
                             end, "HTTP request function logging")
                         end
                         return OriginalFunctions.http_request(requestData)
@@ -899,58 +884,27 @@ local function SetupRequestHooks()
                     if IsExecutorScript() then
                         local url = "Unknown"
                         local method = "GET"
-                        local headers = {}
-                        local body = nil
                         
                         SafeCall(function()
                             url = requestData.Url or requestData.url or "Unknown"
                             method = requestData.Method or requestData.method or "GET"
-                            headers = requestData.Headers or requestData.headers or {}
-                            body = requestData.Body or requestData.body
                             
                             LogActivity("SYN_REQUEST", method .. " -> " .. tostring(url), 4)
                             
-                            local result = OriginalFunctions.syn_request(requestData)
-                            LogHttpRequest("syn_request_" .. method, url, headers, body, result)
-                            AnalyzeNetworkRequest("syn_request", url, body)
-                            return result
+                            table.insert(NetworkRequests, {
+                                method = "syn_request_" .. method,
+                                url = url,
+                                data = requestData,
+                                timestamp = tick() - StartTime,
+                                script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown")
+                            })
+                            
+                            AnalyzeNetworkRequest("syn_request", url, requestData.Body or requestData.body)
                         end, "Syn request logging")
                     end
                     return OriginalFunctions.syn_request(requestData)
                 end
             end, "Setting up syn.request hook")
-        end
-        
-        if getgenv and getgenv().http then
-            SafeCall(function()
-                local httpTable = getgenv().http
-                if httpTable.request then
-                    OriginalFunctions.http_request_table = httpTable.request
-                    httpTable.request = function(requestData)
-                        if IsExecutorScript() then
-                            local url = "Unknown"
-                            local method = "GET"
-                            local headers = {}
-                            local body = nil
-                            
-                            SafeCall(function()
-                                url = requestData.Url or requestData.url or "Unknown"
-                                method = requestData.Method or requestData.method or "GET"
-                                headers = requestData.Headers or requestData.headers or {}
-                                body = requestData.Body or requestData.body
-                                
-                                LogActivity("HTTP_TABLE_REQUEST", method .. " -> " .. tostring(url), 4)
-                                
-                                local result = OriginalFunctions.http_request_table(requestData)
-                                LogHttpRequest("http_table_" .. method, url, headers, body, result)
-                                AnalyzeNetworkRequest("http_table", url, body)
-                                return result
-                            end, "HTTP table request logging")
-                        end
-                        return OriginalFunctions.http_request_table(requestData)
-                    end
-                end
-            end, "Setting up http table hook")
         end
         
         debugPrint("Request hooks installed", "INFO")
@@ -1323,7 +1277,6 @@ local function CalculateRiskScore()
         keylogger_activities = keyloggerCount,
         webhook_activities = webhookCount,
         network_requests = #NetworkRequests,
-        http_requests = #HttpRequests,
         file_operations = #FileOperations,
         keystrokes_logged = #KeystrokeLog,
         blocked_scripts = #BlockedScripts
@@ -1370,7 +1323,6 @@ local function SaveLogsToFile(riskScore)
         logContent = logContent .. "Keylogger Signs         : " .. riskScore.keylogger_activities .. "\n"
         logContent = logContent .. "Webhook Activities      : " .. riskScore.webhook_activities .. "\n"
         logContent = logContent .. "Network Requests        : " .. riskScore.network_requests .. "\n"
-        logContent = logContent .. "HTTP Requests           : " .. riskScore.http_requests .. "\n"
         logContent = logContent .. "File Operations         : " .. riskScore.file_operations .. "\n"
         logContent = logContent .. "Keystrokes Captured     : " .. riskScore.keystrokes_logged .. "\n"
         logContent = logContent .. "Blocked Scripts         : " .. riskScore.blocked_scripts .. "\n\n"
@@ -1392,26 +1344,6 @@ local function SaveLogsToFile(riskScore)
             for scriptId, blockData in pairs(BlockedScripts) do
                 logContent = logContent .. string.format("[%05.1fs] %s - Reason: %s\n",
                     blockData.timestamp, scriptId, blockData.reason)
-            end
-            logContent = logContent .. "\n"
-        end
-        
-        logContent = logContent .. "ALL HTTP REQUESTS:\n"
-        logContent = logContent .. "─────────────────────────────────────────────────────────────────────────────\n"
-        for i, request in pairs(HttpRequests) do
-            logContent = logContent .. string.format("[%05.1fs] %s -> %s\n",
-                request.timestamp, request.method, request.url)
-            logContent = logContent .. "  Script: " .. (request.script or "Unknown") .. "\n"
-            logContent = logContent .. "  Status: " .. tostring(request.status) .. "\n"
-            if request.headers and next(request.headers) then
-                logContent = logContent .. "  Headers: " .. SafeJSONEncode(request.headers) .. "\n"
-            end
-            if request.body then
-                local bodyPreview = tostring(request.body):sub(1, 200)
-                if #tostring(request.body) > 200 then
-                    bodyPreview = bodyPreview .. "..."
-                end
-                logContent = logContent .. "  Body: " .. bodyPreview .. "\n"
             end
             logContent = logContent .. "\n"
         end
@@ -1456,7 +1388,6 @@ function ScriptTester:StartMonitoring()
         ActivityLog = {}
         MaliciousActivities = {}
         NetworkRequests = {}
-        HttpRequests = {}
         FileOperations = {}
         KeystrokeLog = {}
         ChatInterceptions = {}
@@ -1486,7 +1417,6 @@ function ScriptTester:StartMonitoring()
         print("┌─ MONITORING ACTIVE ──────────────────────────────────────────────────────────┐")
         print("│ ✅ All hooks installed successfully")
         print("│ 🟢 Runtime monitoring active")
-        print("│ 🔍 HTTP spy active - capturing all requests")
         if CONFIG.BLOCK_MALICIOUS_SCRIPTS then
             print("│ 🔴 Malicious scripts will be BLOCKED")
         else
@@ -1521,7 +1451,6 @@ function ScriptTester:StartMonitoring()
                     print("  Duration: " .. string.format("%.2f", tick() - StartTime) .. "s")
                     print("  Risk Score: " .. riskScore.total_risk)
                     print("  Safety Score: " .. riskScore.safety_score .. "/100")
-                    print("  HTTP Requests: " .. riskScore.http_requests)
                     print("  Blocked Scripts: " .. riskScore.blocked_scripts)
                     print("")
                     print("DETECTIONS:")
@@ -1564,16 +1493,6 @@ function ScriptTester:StartMonitoring()
                             local activity = sortedActivities[i]
                             print(string.format("  [%d] %s (severity: %d)",
                                 i, activity.type, activity.severity))
-                        end
-                    end
-                    
-                    if #HttpRequests > 0 then
-                        print("")
-                        print("HTTP REQUESTS:")
-                        for i = 1, math.min(10, #HttpRequests) do
-                            local request = HttpRequests[i]
-                            print(string.format("  [%d] %s -> %s",
-                                i, request.method, request.url))
                         end
                     end
                 end
