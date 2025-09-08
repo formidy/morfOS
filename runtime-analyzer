@@ -319,80 +319,81 @@ local function SetupGameServiceHooks()
             end
         end, "Copying game metatable")
         
-       newMetatable.__namecall = newcclosure(function(self, ...)
-    local args = {...}
-    local success, method = SafeCall(function() return getnamecallmethod() end, "Getting namecall method")
-    if not success then
-        return originalNamecall(self, unpack(args))
-    end
-    
-    if IsExecutorScript() then
-        SafeCall(function()
-            if method == "GetService" then
-                local serviceName = args[1]
-                LogActivity("SERVICE_ACCESS", "Accessing: " .. tostring(serviceName), 2)
-                
-                table.insert(ServiceAccess, {
-                    service = serviceName,
-                    timestamp = tick() - StartTime,
-                    script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown")
-                })
-                
-                if serviceName == "MarketplaceService" then
-                    AddMaliciousActivity("MARKETPLACE_SERVICE_ACCESS", {service = serviceName}, 4)
-                end
-            elseif method == "HttpGet" then
-                local url = args[1]
-                HTTPRequestCounter = HTTPRequestCounter + 1
-                local requestId = HTTPRequestCounter
-                
-                LogActivity("LEGACY_HTTP_GET", "URL: " .. tostring(url), 5)
-                LogHTTPRequest("OUTGOING", "LEGACY_GET", url, nil, nil, nil, "game.HttpGet", requestId)
-                
-                local result = originalNamecall(self, unpack(args))
-                
-                LogHTTPRequest("INCOMING", "LEGACY_GET", url, nil, result, nil, "game.HttpGet", requestId)
-                
-                table.insert(NetworkRequests, {
-                    method = "Legacy_HttpGet",
-                    url = url,
-                    timestamp = tick() - StartTime,
-                    script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown"),
-                    args = args
-                })
-                
-                AnalyzeNetworkRequest("Legacy_HttpGet", url, nil)
-                return result
-            elseif method == "HttpPost" then
-                local url = args[1]
-                local data = args[2]
-                HTTPRequestCounter = HTTPRequestCounter + 1
-                local requestId = HTTPRequestCounter
-                
-                LogActivity("LEGACY_HTTP_POST", "URL: " .. tostring(url), 6)
-                LogHTTPRequest("OUTGOING", "LEGACY_POST", url, data, nil, nil, "game.HttpPost", requestId)
-                
-                local result = originalNamecall(self, unpack(args))
-                
-                LogHTTPRequest("INCOMING", "LEGACY_POST", url, data, result, nil, "game.HttpPost", requestId)
-                
-                table.insert(NetworkRequests, {
-                    method = "Legacy_HttpPost",
-                    url = url,
-                    data = data,
-                    timestamp = tick() - StartTime,
-                    script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown"),
-                    args = args
-                })
-                
-                AnalyzeNetworkRequest("Legacy_HttpPost", url, data)
-                return result
+        newMetatable.__namecall = newcclosure(function(self, ...)
+            local success, method = SafeCall(function() return getnamecallmethod() end, "Getting namecall method")
+            if not success then
+                return originalNamecall(self, ...)
             end
-        end, "Game service hook processing")
-    end
-    
-    return originalNamecall(self, unpack(args))
-end)
+            
+            local args = {...}
+            
+            if IsExecutorScript() then
+                SafeCall(function()
+                    if method == "GetService" then
+                        local serviceName = args[1]
+                        LogActivity("SERVICE_ACCESS", "Accessing: " .. tostring(serviceName), 2)
+                        
+                        table.insert(ServiceAccess, {
+                            service = serviceName,
+                            timestamp = tick() - StartTime,
+                            script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown")
+                        })
+                        
+                        if serviceName == "MarketplaceService" then
+                            AddMaliciousActivity("MARKETPLACE_SERVICE_ACCESS", {service = serviceName}, 4)
+                        end
+                    elseif method == "HttpGet" then
+                        local url = args[1]
+                        HTTPRequestCounter = HTTPRequestCounter + 1
+                        local requestId = HTTPRequestCounter
+                        
+                        LogActivity("LEGACY_HTTP_GET", "URL: " .. tostring(url), 5)
+                        LogHTTPRequest("OUTGOING", "LEGACY_GET", url, nil, nil, nil, "game.HttpGet", requestId)
+                        
+                        local result = originalNamecall(self, unpack(args))
+                        
+                        LogHTTPRequest("INCOMING", "LEGACY_GET", url, nil, result, nil, "game.HttpGet", requestId)
+                        
+                        table.insert(NetworkRequests, {
+                            method = "Legacy_HttpGet",
+                            url = url,
+                            timestamp = tick() - StartTime,
+                            script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown"),
+                            args = args
+                        })
+                        
+                        AnalyzeNetworkRequest("Legacy_HttpGet", url, nil)
+                        return result
+                    elseif method == "HttpPost" then
+                        local url = args[1]
+                        local data = args[2]
+                        HTTPRequestCounter = HTTPRequestCounter + 1
+                        local requestId = HTTPRequestCounter
+                        
+                        LogActivity("LEGACY_HTTP_POST", "URL: " .. tostring(url), 6)
+                        LogHTTPRequest("OUTGOING", "LEGACY_POST", url, data, nil, nil, "game.HttpPost", requestId)
+                        
+                         local result = originalNamecall(self, unpack(args))
+                        
+                        LogHTTPRequest("INCOMING", "LEGACY_POST", url, data, result, nil, "game.HttpPost", requestId)
+                        
+                        table.insert(NetworkRequests, {
+                            method = "Legacy_HttpPost",
+                            url = url,
+                            data = data,
+                            timestamp = tick() - StartTime,
+                            script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown"),
+                            args = args
+                        })
+                        
+                        AnalyzeNetworkRequest("Legacy_HttpPost", url, data)
+                        return result
+                    end
+                end, "Game service hook processing")
+            end
+            
+            return originalNamecall(self, ...)
+        end)
         
         SafeCall(function()
             setrawmetatable(game, newMetatable)
@@ -448,7 +449,7 @@ local function SetupHttpServiceHooks()
                         LogActivity("HTTP_POST", "URL: " .. tostring(url), 4)
                         LogHTTPRequest("OUTGOING", "POST", url, data, nil, headers, "HttpService.PostAsync", requestId)
                         
-                        local result = originalNamecall(self, ...)
+                        local result = originalNamecall(self, unpack(args))
                         
                         LogHTTPRequest("INCOMING", "POST", url, data, result, headers, "HttpService.PostAsync", requestId)
                         
@@ -473,7 +474,7 @@ local function SetupHttpServiceHooks()
                         LogActivity("HTTP_GET", "URL: " .. tostring(url), 3)
                         LogHTTPRequest("OUTGOING", "GET", url, nil, nil, headers, "HttpService.GetAsync", requestId)
                         
-                        local result = originalNamecall(self, ...)
+                         local result = originalNamecall(self, unpack(args))
                         
                         LogHTTPRequest("INCOMING", "GET", url, nil, result, headers, "HttpService.GetAsync", requestId)
                         
@@ -500,7 +501,7 @@ local function SetupHttpServiceHooks()
                         LogActivity("HTTP_REQUEST", reqMethod .. " -> " .. tostring(url), 4)
                         LogHTTPRequest("OUTGOING", reqMethod, url, body, nil, headers, "HttpService.RequestAsync", requestId)
                         
-                        local result = originalNamecall(self, ...)
+                        local result = originalNamecall(self, unpack(args))
                         
                         local responseBody = nil
                         if result and type(result) == "table" and result.Body then
