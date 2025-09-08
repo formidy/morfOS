@@ -6,36 +6,25 @@
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 local CONFIG = {
-    -- MONITORING BEHAVIOR
-    BLOCK_MALICIOUS_SCRIPTS = false,     -- true = block/disconnect, false = log only
-    MONITOR_DURATION = 1000,              -- seconds (5 minutes)
-    AUTO_SAVE_LOGS = true,               -- automatically save logs to file
-    
-    -- DETECTION THREHSOLDS
-    ROBUX_STEALER_THRESHOLD = 1,         -- number of purchase prompts to consider malicious
-    DATA_STEALER_THRESHOLD = 3,          -- number of data patterns to consider harvesting
-    KEYLOGGER_THRESHOLD = 1,             -- number of input monitors to consider logging
-    
-    -- ENV FILTERIG
-    MONITOR_EXECUTOR_ONLY = true,        -- only monitor executor-injected scripts
-    IGNORE_GAME_SCRIPTS = true,          -- ignore scripts from the game itself
-    
-    -- OUTPUT SETTINGS
-    SHOW_DETECTIONS = true,              -- show [DETECTION] warnings
-    SHOW_ANALYSIS_DETAILS = true,        -- show detailed analysis output
-    MAX_REPORT_ACTIVITIES = 50,          -- max activities to show in report
-    DEBUG_MODE = false,                  -- show debug prints
-    
-    -- BLOCKING SETTINGS (only if BLOCK_MALICIOUS_SCRIPTS = true)
-    BLOCK_WEBHOOKS = true,               -- block webhook requests
-    BLOCK_PURCHASE_PROMPTS = true,       -- block robux purchase attempts
-    BLOCK_TELEPORTS = false,             -- block teleportation attempts
-    BLOCK_KEYLOGGERS = true,             -- block keystroke monitoring
+    BLOCK_MALICIOUS_SCRIPTS = false,
+    MONITOR_DURATION = 1000,
+    AUTO_SAVE_LOGS = true,
+    ROBUX_STEALER_THRESHOLD = 1,
+    DATA_STEALER_THRESHOLD = 3,
+    KEYLOGGER_THRESHOLD = 1,
+    MONITOR_EXECUTOR_ONLY = true,
+    IGNORE_GAME_SCRIPTS = true,
+    SHOW_DETECTIONS = true,
+    SHOW_ANALYSIS_DETAILS = true,
+    MAX_REPORT_ACTIVITIES = 50,
+    DEBUG_MODE = false,
+    BLOCK_WEBHOOKS = true,
+    BLOCK_PURCHASE_PROMPTS = true,
+    BLOCK_TELEPORTS = false,
+    BLOCK_KEYLOGGERS = true,
+    HTTP_SPY_ENABLED = true,
+    SHOW_ALL_HTTP_REQUESTS = true
 }
-
--- ═══════════════════════════════════════════════════════════════════════════════
---                                  UTILITIES
--- ═══════════════════════════════════════════════════════════════════════════════
 
 local function SafeCall(func, description)
     if not func then 
@@ -95,10 +84,6 @@ local function SafeJSONEncode(data)
     return success and result or tostring(data or "nil")
 end
 
--- ═══════════════════════════════════════════════════════════════════════════════
---                                   SERVICES
--- ═══════════════════════════════════════════════════════════════════════════════
-
 local ScriptTester = {}
 local Players = SafeGetService("Players")
 local RunService = SafeGetService("RunService")
@@ -106,10 +91,6 @@ local HttpService = SafeGetService("HttpService")
 local MarketplaceService = SafeGetService("MarketplaceService")
 local TeleportService = SafeGetService("TeleportService")
 local UserInputService = SafeGetService("UserInputService")
-
--- ═══════════════════════════════════════════════════════════════════════════════
---                                  VARIABLES
--- ═══════════════════════════════════════════════════════════════════════════════
 
 local LocalPlayer = nil
 SafeCall(function()
@@ -133,10 +114,7 @@ local HookedFunctions = {}
 local PurchaseAttempts = {}
 local DataCollectionPatterns = {}
 local BlockedScripts = {}
-
--- ═══════════════════════════════════════════════════════════════════════════════
---                                UTILITY FUNCTIONS
--- ═══════════════════════════════════════════════════════════════════════════════
+local HTTPSpyLog = {}
 
 local function IsExecutorScript()
     if not CONFIG.MONITOR_EXECUTOR_ONLY then
@@ -189,9 +167,42 @@ local function ShouldBlockActivity(activityType, severity)
     return severity >= 9
 end
 
--- ═══════════════════════════════════════════════════════════════════════════════
---                               LOGGING FUNCTIONS
--- ═══════════════════════════════════════════════════════════════════════════════
+local function LogHTTPRequest(method, url, data, headers, source)
+    SafeCall(function()
+        if not MonitoringActive or not CONFIG.HTTP_SPY_ENABLED then 
+            return 
+        end
+        
+        local success, callingScript = SafeCall(function()
+            return getcallingscript and getcallingscript() or "Unknown"
+        end, "Getting calling script for HTTP spy")
+        
+        local scriptStr = success and tostring(callingScript) or "Unknown"
+        
+        local httpData = {
+            method = method,
+            url = url,
+            data = data,
+            headers = headers,
+            source = source,
+            timestamp = tick() - StartTime,
+            script = scriptStr,
+            direction = "OUTGOING"
+        }
+        
+        table.insert(HTTPSpyLog, httpData)
+        
+        if CONFIG.SHOW_ALL_HTTP_REQUESTS then
+            local urlStr = tostring(url)
+            if #urlStr > 100 then
+                urlStr = string.sub(urlStr, 1, 100) .. "..."
+            end
+            print("[HTTP-SPY] " .. method .. " -> " .. urlStr)
+        end
+        
+        debugPrint("HTTP request logged: " .. method .. " to " .. tostring(url), "INFO")
+    end, "HTTP request logging")
+end
 
 local function LogActivity(activityType, details, severity)
     SafeCall(function()
@@ -265,10 +276,6 @@ local function AddMaliciousActivity(activityType, data, severity)
     end, "Malicious activity processing")
 end
 
--- ═══════════════════════════════════════════════════════════════════════════════
---                                HOOK FUNCTIONS
--- ═══════════════════════════════════════════════════════════════════════════════
-
 local function SetupGameServiceHooks()
     SafeCall(function()
         if not getrawmetatable or not setrawmetatable or not newcclosure or not getnamecallmethod then
@@ -321,6 +328,7 @@ local function SetupGameServiceHooks()
                     elseif method == "HttpGet" then
                         local url = args[1]
                         LogActivity("LEGACY_HTTP_GET", "URL: " .. tostring(url), 5)
+                        LogHTTPRequest("LEGACY_GET", url, nil, nil, "game.HttpGet")
                         
                         table.insert(NetworkRequests, {
                             method = "Legacy_HttpGet",
@@ -335,6 +343,7 @@ local function SetupGameServiceHooks()
                         local url = args[1]
                         local data = args[2]
                         LogActivity("LEGACY_HTTP_POST", "URL: " .. tostring(url), 6)
+                        LogHTTPRequest("LEGACY_POST", url, data, nil, "game.HttpPost")
                         
                         table.insert(NetworkRequests, {
                             method = "Legacy_HttpPost",
@@ -400,12 +409,15 @@ local function SetupHttpServiceHooks()
                     if method == "PostAsync" then
                         local url = args[1]
                         local data = args[2]
+                        local headers = args[3]
                         LogActivity("HTTP_POST", "URL: " .. tostring(url), 4)
+                        LogHTTPRequest("POST", url, data, headers, "HttpService.PostAsync")
                         
                         table.insert(NetworkRequests, {
                             method = "PostAsync",
                             url = url,
                             data = data,
+                            headers = headers,
                             timestamp = tick() - StartTime,
                             script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown"),
                             args = args
@@ -414,11 +426,14 @@ local function SetupHttpServiceHooks()
                         AnalyzeNetworkRequest("PostAsync", url, data)
                     elseif method == "GetAsync" then
                         local url = args[1]
+                        local headers = args[2]
                         LogActivity("HTTP_GET", "URL: " .. tostring(url), 3)
+                        LogHTTPRequest("GET", url, nil, headers, "HttpService.GetAsync")
                         
                         table.insert(NetworkRequests, {
                             method = "GetAsync",
                             url = url,
+                            headers = headers,
                             timestamp = tick() - StartTime,
                             script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown"),
                             args = args
@@ -429,8 +444,11 @@ local function SetupHttpServiceHooks()
                         local requestData = args[1]
                         local url = requestData and (requestData.Url or requestData.url) or "Unknown"
                         local reqMethod = requestData and (requestData.Method or requestData.method) or "Unknown"
+                        local headers = requestData and (requestData.Headers or requestData.headers) or {}
+                        local body = requestData and (requestData.Body or requestData.body) or nil
                         
                         LogActivity("HTTP_REQUEST", reqMethod .. " -> " .. tostring(url), 4)
+                        LogHTTPRequest(reqMethod, url, body, headers, "HttpService.RequestAsync")
                         
                         table.insert(NetworkRequests, {
                             method = "RequestAsync_" .. reqMethod,
@@ -441,7 +459,11 @@ local function SetupHttpServiceHooks()
                             args = args
                         })
                         
-                        AnalyzeNetworkRequest("RequestAsync", url, requestData and (requestData.Body or requestData.body))
+                        AnalyzeNetworkRequest("RequestAsync", url, body)
+                    elseif method == "JSONEncode" then
+                        LogActivity("JSON_ENCODE", "Data encoding", 1)
+                    elseif method == "JSONDecode" then
+                        LogActivity("JSON_DECODE", "Data decoding", 1)
                     end
                 end, "HTTP service hook processing")
             end
@@ -821,12 +843,17 @@ local function SetupRequestHooks()
                         if IsExecutorScript() then
                             local url = "Unknown"
                             local method = "GET"
+                            local headers = {}
+                            local body = nil
                             
                             SafeCall(function()
                                 url = requestData.Url or requestData.url or "Unknown"
                                 method = requestData.Method or requestData.method or "GET"
+                                headers = requestData.Headers or requestData.headers or {}
+                                body = requestData.Body or requestData.body
                                 
                                 LogActivity("REQUEST_FUNCTION", method .. " -> " .. tostring(url), 4)
+                                LogHTTPRequest(method, url, body, headers, "request()")
                                 
                                 table.insert(NetworkRequests, {
                                     method = "request_" .. method,
@@ -836,7 +863,7 @@ local function SetupRequestHooks()
                                     script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown")
                                 })
                                 
-                                AnalyzeNetworkRequest("request", url, requestData.Body or requestData.body)
+                                AnalyzeNetworkRequest("request", url, body)
                             end, "Request function logging")
                         end
                         return OriginalFunctions.request(requestData)
@@ -853,12 +880,17 @@ local function SetupRequestHooks()
                         if IsExecutorScript() then
                             local url = "Unknown"
                             local method = "GET"
+                            local headers = {}
+                            local body = nil
                             
                             SafeCall(function()
                                 url = requestData.Url or requestData.url or "Unknown"
                                 method = requestData.Method or requestData.method or "GET"
+                                headers = requestData.Headers or requestData.headers or {}
+                                body = requestData.Body or requestData.body
                                 
                                 LogActivity("HTTP_REQUEST_FUNCTION", method .. " -> " .. tostring(url), 4)
+                                LogHTTPRequest(method, url, body, headers, "http_request()")
                                 
                                 table.insert(NetworkRequests, {
                                     method = "http_request_" .. method,
@@ -868,7 +900,7 @@ local function SetupRequestHooks()
                                     script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown")
                                 })
                                 
-                                AnalyzeNetworkRequest("http_request", url, requestData.Body or requestData.body)
+                                AnalyzeNetworkRequest("http_request", url, body)
                             end, "HTTP request function logging")
                         end
                         return OriginalFunctions.http_request(requestData)
@@ -884,12 +916,17 @@ local function SetupRequestHooks()
                     if IsExecutorScript() then
                         local url = "Unknown"
                         local method = "GET"
+                        local headers = {}
+                        local body = nil
                         
                         SafeCall(function()
                             url = requestData.Url or requestData.url or "Unknown"
                             method = requestData.Method or requestData.method or "GET"
+                            headers = requestData.Headers or requestData.headers or {}
+                            body = requestData.Body or requestData.body
                             
                             LogActivity("SYN_REQUEST", method .. " -> " .. tostring(url), 4)
+                            LogHTTPRequest(method, url, body, headers, "syn.request()")
                             
                             table.insert(NetworkRequests, {
                                 method = "syn_request_" .. method,
@@ -899,7 +936,7 @@ local function SetupRequestHooks()
                                 script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown")
                             })
                             
-                            AnalyzeNetworkRequest("syn_request", url, requestData.Body or requestData.body)
+                            AnalyzeNetworkRequest("syn_request", url, body)
                         end, "Syn request logging")
                     end
                     return OriginalFunctions.syn_request(requestData)
@@ -1053,10 +1090,6 @@ local function SetupChatMonitoring()
         debugPrint("Chat monitoring installed", "INFO")
     end, "Chat monitoring setup")
 end
-
--- ═══════════════════════════════════════════════════════════════════════════════
---                              ANALYSIS FUNCTIONS
--- ═══════════════════════════════════════════════════════════════════════════════
 
 function AnalyzeNetworkRequest(method, url, data)
     SafeCall(function()
@@ -1231,10 +1264,6 @@ local function DetectDataStealerBehavior()
     end, "Data stealer behavior detection")
 end
 
--- ═══════════════════════════════════════════════════════════════════════════════
---                              REPORT FUNCTIONS
--- ═══════════════════════════════════════════════════════════════════════════════
-
 local function CalculateRiskScore()
     SafeCall(function()
         DetectRobuxStealerBehavior()
@@ -1279,7 +1308,8 @@ local function CalculateRiskScore()
         network_requests = #NetworkRequests,
         file_operations = #FileOperations,
         keystrokes_logged = #KeystrokeLog,
-        blocked_scripts = #BlockedScripts
+        blocked_scripts = #BlockedScripts,
+        http_spy_requests = #HTTPSpyLog
     }
 end
 
@@ -1303,13 +1333,15 @@ local function SaveLogsToFile(riskScore)
         local filename = "runtime_security_" .. timestamp .. ".log"
         
         local logContent = "═══════════════════════════════════════════════════════════════════════════════\n"
-        logContent = logContent .. "                      MORFEIN'S RUNTIME ANALYZER v2.0\n"
+        logContent = logContent .. "                      MORFEIN'S RUNTIME ANALYZER v2.1\n"
         logContent = logContent .. "═══════════════════════════════════════════════════════════════════════════════\n\n"
         logContent = logContent .. "CONFIGURATION:\n"
         logContent = logContent .. "─────────────────────────────────────────────────────────────────────────────\n"
         logContent = logContent .. "Block Malicious Scripts : " .. tostring(CONFIG.BLOCK_MALICIOUS_SCRIPTS) .. "\n"
         logContent = logContent .. "Monitor Executor Only   : " .. tostring(CONFIG.MONITOR_EXECUTOR_ONLY) .. "\n"
-        logContent = logContent .. "Ignore Game Scripts     : " .. tostring(CONFIG.IGNORE_GAME_SCRIPTS) .. "\n\n"
+        logContent = logContent .. "Ignore Game Scripts     : " .. tostring(CONFIG.IGNORE_GAME_SCRIPTS) .. "\n"
+        logContent = logContent .. "HTTP Spy Enabled        : " .. tostring(CONFIG.HTTP_SPY_ENABLED) .. "\n"
+        logContent = logContent .. "Show All HTTP Requests  : " .. tostring(CONFIG.SHOW_ALL_HTTP_REQUESTS) .. "\n\n"
         
         logContent = logContent .. "MONITORING SUMMARY:\n"
         logContent = logContent .. "─────────────────────────────────────────────────────────────────────────────\n"
@@ -1323,9 +1355,30 @@ local function SaveLogsToFile(riskScore)
         logContent = logContent .. "Keylogger Signs         : " .. riskScore.keylogger_activities .. "\n"
         logContent = logContent .. "Webhook Activities      : " .. riskScore.webhook_activities .. "\n"
         logContent = logContent .. "Network Requests        : " .. riskScore.network_requests .. "\n"
+        logContent = logContent .. "HTTP Spy Requests       : " .. riskScore.http_spy_requests .. "\n"
         logContent = logContent .. "File Operations         : " .. riskScore.file_operations .. "\n"
         logContent = logContent .. "Keystrokes Captured     : " .. riskScore.keystrokes_logged .. "\n"
         logContent = logContent .. "Blocked Scripts         : " .. riskScore.blocked_scripts .. "\n\n"
+        
+        logContent = logContent .. "HTTP SPY LOG (ALL REQUESTS):\n"
+        logContent = logContent .. "─────────────────────────────────────────────────────────────────────────────\n"
+        for i, httpReq in pairs(HTTPSpyLog) do
+            logContent = logContent .. string.format("[%05.1fs] [%s] %s -> %s\n",
+                httpReq.timestamp, httpReq.direction, httpReq.method, httpReq.url)
+            logContent = logContent .. "  Source: " .. (httpReq.source or "Unknown") .. "\n"
+            logContent = logContent .. "  Script: " .. (httpReq.script or "Unknown") .. "\n"
+            if httpReq.headers and next(httpReq.headers) then
+                logContent = logContent .. "  Headers: " .. SafeJSONEncode(httpReq.headers) .. "\n"
+            end
+            if httpReq.data then
+                local dataStr = tostring(httpReq.data)
+                if #dataStr > 200 then
+                    dataStr = string.sub(dataStr, 1, 200) .. "... [TRUNCATED]"
+                end
+                logContent = logContent .. "  Data: " .. dataStr .. "\n"
+            end
+            logContent = logContent .. "\n"
+        end
         
         logContent = logContent .. "TOP " .. CONFIG.MAX_REPORT_ACTIVITIES .. " MALICIOUS ACTIVITIES:\n"
         logContent = logContent .. "─────────────────────────────────────────────────────────────────────────────\n"
@@ -1363,22 +1416,20 @@ local function SaveLogsToFile(riskScore)
     end, "Log file saving")
 end
 
--- ═══════════════════════════════════════════════════════════════════════════════
---                                MAIN FUNCTION
--- ═══════════════════════════════════════════════════════════════════════════════
-
 function ScriptTester:StartMonitoring()
     SafeCall(function()
         print("\n")
         print("╔══════════════════════════════════════════════════════════════════════════════╗")
-        print("║                               RUNTIME ANALYZER                       ")
-        print("║                              morefein was here                           ")
+        print("║                               RUNTIME ANALYZER v2.1                         ║")
+        print("║                              morefein was here                              ║")
         print("╚══════════════════════════════════════════════════════════════════════════════╝")
         print("")
         print("CONFIGURATION:")
         print("  Block Malicious Scripts: " .. tostring(CONFIG.BLOCK_MALICIOUS_SCRIPTS))
         print("  Monitor Executor Only: " .. tostring(CONFIG.MONITOR_EXECUTOR_ONLY))
         print("  Show Detections: " .. tostring(CONFIG.SHOW_DETECTIONS))
+        print("  HTTP Spy Enabled: " .. tostring(CONFIG.HTTP_SPY_ENABLED))
+        print("  Show All HTTP Requests: " .. tostring(CONFIG.SHOW_ALL_HTTP_REQUESTS))
         print("  Debug Mode: " .. tostring(CONFIG.DEBUG_MODE))
         print("")
         print("┌─ INITIALIZING HOOKS ─────────────────────────────────────────────────────────┐")
@@ -1397,6 +1448,7 @@ function ScriptTester:StartMonitoring()
         PurchaseAttempts = {}
         DataCollectionPatterns = {}
         BlockedScripts = {}
+        HTTPSpyLog = {}
         
         MonitoringActive = true
         StartTime = tick()
@@ -1417,6 +1469,7 @@ function ScriptTester:StartMonitoring()
         print("┌─ MONITORING ACTIVE ──────────────────────────────────────────────────────────┐")
         print("│ ✅ All hooks installed successfully")
         print("│ 🟢 Runtime monitoring active")
+        print("│ 🌐 HTTP Spy monitoring active")
         if CONFIG.BLOCK_MALICIOUS_SCRIPTS then
             print("│ 🔴 Malicious scripts will be BLOCKED")
         else
@@ -1452,6 +1505,7 @@ function ScriptTester:StartMonitoring()
                     print("  Risk Score: " .. riskScore.total_risk)
                     print("  Safety Score: " .. riskScore.safety_score .. "/100")
                     print("  Blocked Scripts: " .. riskScore.blocked_scripts)
+                    print("  HTTP Requests Monitored: " .. riskScore.http_spy_requests)
                     print("")
                     print("DETECTIONS:")
                     print("  Robux Stealers: " .. riskScore.robux_stealer_activities)
@@ -1485,6 +1539,19 @@ function ScriptTester:StartMonitoring()
                     
                     print("VERDICT: " .. verdictIcon .. " " .. verdict)
                     print("")
+                    
+                    if #HTTPSpyLog > 0 then
+                        print("HTTP SPY - TOP 10 REQUESTS:")
+                        for i = 1, math.min(10, #HTTPSpyLog) do
+                            local req = HTTPSpyLog[i]
+                            local urlDisplay = req.url
+                            if #urlDisplay > 80 then
+                                urlDisplay = string.sub(urlDisplay, 1, 80) .. "..."
+                            end
+                            print(string.format("  [%d] %s -> %s", i, req.method, urlDisplay))
+                        end
+                        print("")
+                    end
                     
                     if #MaliciousActivities > 0 then
                         print("TOP DETECTIONS:")
