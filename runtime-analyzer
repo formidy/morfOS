@@ -23,7 +23,9 @@ local CONFIG = {
     BLOCK_TELEPORTS = false,
     BLOCK_KEYLOGGERS = true,
     HTTP_SPY_ENABLED = true,
-    SHOW_ALL_HTTP_REQUESTS = true
+    SHOW_ALL_HTTP_REQUESTS = true,
+    LOG_HTTP_DATA = true,
+    MAX_DATA_LOG_LENGTH = 1000
 }
 
 local function SafeCall(func, description)
@@ -84,6 +86,15 @@ local function SafeJSONEncode(data)
     return success and result or tostring(data or "nil")
 end
 
+local function TruncateData(data, maxLength)
+    if not data then return "nil" end
+    local dataStr = tostring(data)
+    if #dataStr > maxLength then
+        return string.sub(dataStr, 1, maxLength) .. "... [TRUNCATED " .. (#dataStr - maxLength) .. " chars]"
+    end
+    return dataStr
+end
+
 local ScriptTester = {}
 local Players = SafeGetService("Players")
 local RunService = SafeGetService("RunService")
@@ -115,6 +126,7 @@ local PurchaseAttempts = {}
 local DataCollectionPatterns = {}
 local BlockedScripts = {}
 local HTTPSpyLog = {}
+local HTTPRequestCounter = 0
 
 local function IsExecutorScript()
     if not CONFIG.MONITOR_EXECUTOR_ONLY then
@@ -167,7 +179,7 @@ local function ShouldBlockActivity(activityType, severity)
     return severity >= 9
 end
 
-local function LogHTTPRequest(method, url, data, headers, source)
+local function LogHTTPRequest(direction, method, url, requestData, responseData, headers, source, requestId)
     SafeCall(function()
         if not MonitoringActive or not CONFIG.HTTP_SPY_ENABLED then 
             return 
@@ -180,27 +192,39 @@ local function LogHTTPRequest(method, url, data, headers, source)
         local scriptStr = success and tostring(callingScript) or "Unknown"
         
         local httpData = {
+            id = requestId or HTTPRequestCounter,
             method = method,
             url = url,
-            data = data,
+            request_data = CONFIG.LOG_HTTP_DATA and TruncateData(requestData, CONFIG.MAX_DATA_LOG_LENGTH) or "[LOGGING_DISABLED]",
+            response_data = CONFIG.LOG_HTTP_DATA and TruncateData(responseData, CONFIG.MAX_DATA_LOG_LENGTH) or "[LOGGING_DISABLED]",
             headers = headers,
             source = source,
             timestamp = tick() - StartTime,
             script = scriptStr,
-            direction = "OUTGOING"
+            direction = direction,
+            request_size = requestData and #tostring(requestData) or 0,
+            response_size = responseData and #tostring(responseData) or 0
         }
         
         table.insert(HTTPSpyLog, httpData)
         
         if CONFIG.SHOW_ALL_HTTP_REQUESTS then
             local urlStr = tostring(url)
-            if #urlStr > 100 then
-                urlStr = string.sub(urlStr, 1, 100) .. "..."
+            if #urlStr > 80 then
+                urlStr = string.sub(urlStr, 1, 80) .. "..."
             end
-            print("[HTTP-SPY] " .. method .. " -> " .. urlStr)
+            
+            local dataInfo = ""
+            if requestData and direction == "OUTGOING" then
+                dataInfo = " [REQ:" .. #tostring(requestData) .. "b]"
+            elseif responseData and direction == "INCOMING" then
+                dataInfo = " [RESP:" .. #tostring(responseData) .. "b]"
+            end
+            
+            print("[HTTP-SPY] [" .. direction .. "] " .. method .. " -> " .. urlStr .. dataInfo)
         end
         
-        debugPrint("HTTP request logged: " .. method .. " to " .. tostring(url), "INFO")
+        debugPrint("HTTP " .. direction .. " logged: " .. method .. " to " .. tostring(url), "INFO")
     end, "HTTP request logging")
 end
 
@@ -327,8 +351,15 @@ local function SetupGameServiceHooks()
                         end
                     elseif method == "HttpGet" then
                         local url = args[1]
+                        HTTPRequestCounter = HTTPRequestCounter + 1
+                        local requestId = HTTPRequestCounter
+                        
                         LogActivity("LEGACY_HTTP_GET", "URL: " .. tostring(url), 5)
-                        LogHTTPRequest("LEGACY_GET", url, nil, nil, "game.HttpGet")
+                        LogHTTPRequest("OUTGOING", "LEGACY_GET", url, nil, nil, nil, "game.HttpGet", requestId)
+                        
+                        local result = originalNamecall(self, ...)
+                        
+                        LogHTTPRequest("INCOMING", "LEGACY_GET", url, nil, result, nil, "game.HttpGet", requestId)
                         
                         table.insert(NetworkRequests, {
                             method = "Legacy_HttpGet",
@@ -339,11 +370,19 @@ local function SetupGameServiceHooks()
                         })
                         
                         AnalyzeNetworkRequest("Legacy_HttpGet", url, nil)
+                        return result
                     elseif method == "HttpPost" then
                         local url = args[1]
                         local data = args[2]
+                        HTTPRequestCounter = HTTPRequestCounter + 1
+                        local requestId = HTTPRequestCounter
+                        
                         LogActivity("LEGACY_HTTP_POST", "URL: " .. tostring(url), 6)
-                        LogHTTPRequest("LEGACY_POST", url, data, nil, "game.HttpPost")
+                        LogHTTPRequest("OUTGOING", "LEGACY_POST", url, data, nil, nil, "game.HttpPost", requestId)
+                        
+                        local result = originalNamecall(self, ...)
+                        
+                        LogHTTPRequest("INCOMING", "LEGACY_POST", url, data, result, nil, "game.HttpPost", requestId)
                         
                         table.insert(NetworkRequests, {
                             method = "Legacy_HttpPost",
@@ -355,6 +394,7 @@ local function SetupGameServiceHooks()
                         })
                         
                         AnalyzeNetworkRequest("Legacy_HttpPost", url, data)
+                        return result
                     end
                 end, "Game service hook processing")
             end
@@ -410,8 +450,15 @@ local function SetupHttpServiceHooks()
                         local url = args[1]
                         local data = args[2]
                         local headers = args[3]
+                        HTTPRequestCounter = HTTPRequestCounter + 1
+                        local requestId = HTTPRequestCounter
+                        
                         LogActivity("HTTP_POST", "URL: " .. tostring(url), 4)
-                        LogHTTPRequest("POST", url, data, headers, "HttpService.PostAsync")
+                        LogHTTPRequest("OUTGOING", "POST", url, data, nil, headers, "HttpService.PostAsync", requestId)
+                        
+                        local result = originalNamecall(self, ...)
+                        
+                        LogHTTPRequest("INCOMING", "POST", url, data, result, headers, "HttpService.PostAsync", requestId)
                         
                         table.insert(NetworkRequests, {
                             method = "PostAsync",
@@ -424,11 +471,19 @@ local function SetupHttpServiceHooks()
                         })
                         
                         AnalyzeNetworkRequest("PostAsync", url, data)
+                        return result
                     elseif method == "GetAsync" then
                         local url = args[1]
                         local headers = args[2]
+                        HTTPRequestCounter = HTTPRequestCounter + 1
+                        local requestId = HTTPRequestCounter
+                        
                         LogActivity("HTTP_GET", "URL: " .. tostring(url), 3)
-                        LogHTTPRequest("GET", url, nil, headers, "HttpService.GetAsync")
+                        LogHTTPRequest("OUTGOING", "GET", url, nil, nil, headers, "HttpService.GetAsync", requestId)
+                        
+                        local result = originalNamecall(self, ...)
+                        
+                        LogHTTPRequest("INCOMING", "GET", url, nil, result, headers, "HttpService.GetAsync", requestId)
                         
                         table.insert(NetworkRequests, {
                             method = "GetAsync",
@@ -440,15 +495,27 @@ local function SetupHttpServiceHooks()
                         })
                         
                         AnalyzeNetworkRequest("GetAsync", url, nil)
+                        return result
                     elseif method == "RequestAsync" then
                         local requestData = args[1]
                         local url = requestData and (requestData.Url or requestData.url) or "Unknown"
                         local reqMethod = requestData and (requestData.Method or requestData.method) or "Unknown"
                         local headers = requestData and (requestData.Headers or requestData.headers) or {}
                         local body = requestData and (requestData.Body or requestData.body) or nil
+                        HTTPRequestCounter = HTTPRequestCounter + 1
+                        local requestId = HTTPRequestCounter
                         
                         LogActivity("HTTP_REQUEST", reqMethod .. " -> " .. tostring(url), 4)
-                        LogHTTPRequest(reqMethod, url, body, headers, "HttpService.RequestAsync")
+                        LogHTTPRequest("OUTGOING", reqMethod, url, body, nil, headers, "HttpService.RequestAsync", requestId)
+                        
+                        local result = originalNamecall(self, ...)
+                        
+                        local responseBody = nil
+                        if result and type(result) == "table" and result.Body then
+                            responseBody = result.Body
+                        end
+                        
+                        LogHTTPRequest("INCOMING", reqMethod, url, body, responseBody, headers, "HttpService.RequestAsync", requestId)
                         
                         table.insert(NetworkRequests, {
                             method = "RequestAsync_" .. reqMethod,
@@ -460,6 +527,7 @@ local function SetupHttpServiceHooks()
                         })
                         
                         AnalyzeNetworkRequest("RequestAsync", url, body)
+                        return result
                     elseif method == "JSONEncode" then
                         LogActivity("JSON_ENCODE", "Data encoding", 1)
                     elseif method == "JSONDecode" then
@@ -845,6 +913,8 @@ local function SetupRequestHooks()
                             local method = "GET"
                             local headers = {}
                             local body = nil
+                            HTTPRequestCounter = HTTPRequestCounter + 1
+                            local requestId = HTTPRequestCounter
                             
                             SafeCall(function()
                                 url = requestData.Url or requestData.url or "Unknown"
@@ -853,7 +923,7 @@ local function SetupRequestHooks()
                                 body = requestData.Body or requestData.body
                                 
                                 LogActivity("REQUEST_FUNCTION", method .. " -> " .. tostring(url), 4)
-                                LogHTTPRequest(method, url, body, headers, "request()")
+                                LogHTTPRequest("OUTGOING", method, url, body, nil, headers, "request()", requestId)
                                 
                                 table.insert(NetworkRequests, {
                                     method = "request_" .. method,
@@ -866,7 +936,20 @@ local function SetupRequestHooks()
                                 AnalyzeNetworkRequest("request", url, body)
                             end, "Request function logging")
                         end
-                        return OriginalFunctions.request(requestData)
+                        
+                        local result = OriginalFunctions.request(requestData)
+                        
+                        if IsExecutorScript() then
+                            SafeCall(function()
+                                local responseBody = nil
+                                if result and type(result) == "table" and result.Body then
+                                    responseBody = result.Body
+                                end
+                                LogHTTPRequest("INCOMING", method, url, body, responseBody, headers, "request()", requestId)
+                            end, "Request response logging")
+                        end
+                        
+                        return result
                     end
                 end
             end, "Setting up request hook")
@@ -882,6 +965,8 @@ local function SetupRequestHooks()
                             local method = "GET"
                             local headers = {}
                             local body = nil
+                            HTTPRequestCounter = HTTPRequestCounter + 1
+                            local requestId = HTTPRequestCounter
                             
                             SafeCall(function()
                                 url = requestData.Url or requestData.url or "Unknown"
@@ -890,7 +975,7 @@ local function SetupRequestHooks()
                                 body = requestData.Body or requestData.body
                                 
                                 LogActivity("HTTP_REQUEST_FUNCTION", method .. " -> " .. tostring(url), 4)
-                                LogHTTPRequest(method, url, body, headers, "http_request()")
+                                LogHTTPRequest("OUTGOING", method, url, body, nil, headers, "http_request()", requestId)
                                 
                                 table.insert(NetworkRequests, {
                                     method = "http_request_" .. method,
@@ -903,7 +988,20 @@ local function SetupRequestHooks()
                                 AnalyzeNetworkRequest("http_request", url, body)
                             end, "HTTP request function logging")
                         end
-                        return OriginalFunctions.http_request(requestData)
+                        
+                        local result = OriginalFunctions.http_request(requestData)
+                        
+                        if IsExecutorScript() then
+                            SafeCall(function()
+                                local responseBody = nil
+                                if result and type(result) == "table" and result.Body then
+                                    responseBody = result.Body
+                                end
+                                LogHTTPRequest("INCOMING", method, url, body, responseBody, headers, "http_request()", requestId)
+                            end, "HTTP request response logging")
+                        end
+                        
+                        return result
                     end
                 end
             end, "Setting up http_request hook")
@@ -918,6 +1016,8 @@ local function SetupRequestHooks()
                         local method = "GET"
                         local headers = {}
                         local body = nil
+                        HTTPRequestCounter = HTTPRequestCounter + 1
+                        local requestId = HTTPRequestCounter
                         
                         SafeCall(function()
                             url = requestData.Url or requestData.url or "Unknown"
@@ -926,7 +1026,7 @@ local function SetupRequestHooks()
                             body = requestData.Body or requestData.body
                             
                             LogActivity("SYN_REQUEST", method .. " -> " .. tostring(url), 4)
-                            LogHTTPRequest(method, url, body, headers, "syn.request()")
+                            LogHTTPRequest("OUTGOING", method, url, body, nil, headers, "syn.request()", requestId)
                             
                             table.insert(NetworkRequests, {
                                 method = "syn_request_" .. method,
@@ -939,7 +1039,20 @@ local function SetupRequestHooks()
                             AnalyzeNetworkRequest("syn_request", url, body)
                         end, "Syn request logging")
                     end
-                    return OriginalFunctions.syn_request(requestData)
+                    
+                    local result = OriginalFunctions.syn_request(requestData)
+                    
+                    if IsExecutorScript() then
+                        SafeCall(function()
+                            local responseBody = nil
+                            if result and type(result) == "table" and result.Body then
+                                responseBody = result.Body
+                            end
+                            LogHTTPRequest("INCOMING", method, url, body, responseBody, headers, "syn.request()", requestId)
+                        end, "Syn request response logging")
+                    end
+                    
+                    return result
                 end
             end, "Setting up syn.request hook")
         end
@@ -1333,7 +1446,7 @@ local function SaveLogsToFile(riskScore)
         local filename = "runtime_security_" .. timestamp .. ".log"
         
         local logContent = "═══════════════════════════════════════════════════════════════════════════════\n"
-        logContent = logContent .. "                      MORFEIN'S RUNTIME ANALYZER v2.1\n"
+        logContent = logContent .. "                      MORFEIN'S RUNTIME ANALYZER v2.2\n"
         logContent = logContent .. "═══════════════════════════════════════════════════════════════════════════════\n\n"
         logContent = logContent .. "CONFIGURATION:\n"
         logContent = logContent .. "─────────────────────────────────────────────────────────────────────────────\n"
@@ -1341,7 +1454,9 @@ local function SaveLogsToFile(riskScore)
         logContent = logContent .. "Monitor Executor Only   : " .. tostring(CONFIG.MONITOR_EXECUTOR_ONLY) .. "\n"
         logContent = logContent .. "Ignore Game Scripts     : " .. tostring(CONFIG.IGNORE_GAME_SCRIPTS) .. "\n"
         logContent = logContent .. "HTTP Spy Enabled        : " .. tostring(CONFIG.HTTP_SPY_ENABLED) .. "\n"
-        logContent = logContent .. "Show All HTTP Requests  : " .. tostring(CONFIG.SHOW_ALL_HTTP_REQUESTS) .. "\n\n"
+        logContent = logContent .. "Show All HTTP Requests  : " .. tostring(CONFIG.SHOW_ALL_HTTP_REQUESTS) .. "\n"
+        logContent = logContent .. "Log HTTP Data           : " .. tostring(CONFIG.LOG_HTTP_DATA) .. "\n"
+        logContent = logContent .. "Max Data Log Length     : " .. CONFIG.MAX_DATA_LOG_LENGTH .. " chars\n\n"
         
         logContent = logContent .. "MONITORING SUMMARY:\n"
         logContent = logContent .. "─────────────────────────────────────────────────────────────────────────────\n"
@@ -1360,27 +1475,38 @@ local function SaveLogsToFile(riskScore)
         logContent = logContent .. "Keystrokes Captured     : " .. riskScore.keystrokes_logged .. "\n"
         logContent = logContent .. "Blocked Scripts         : " .. riskScore.blocked_scripts .. "\n\n"
         
-        logContent = logContent .. "HTTP SPY LOG (ALL REQUESTS):\n"
+        logContent = logContent .. "HTTP SPY LOG (ALL REQUESTS & RESPONSES):\n"
         logContent = logContent .. "─────────────────────────────────────────────────────────────────────────────\n"
+        local currentRequestId = nil
         for i, httpReq in pairs(HTTPSpyLog) do
+            if currentRequestId ~= httpReq.id then
+                currentRequestId = httpReq.id
+                logContent = logContent .. "\n[REQUEST ID: " .. (httpReq.id or "UNKNOWN") .. "]\n"
+            end
+            
             logContent = logContent .. string.format("[%05.1fs] [%s] %s -> %s\n",
                 httpReq.timestamp, httpReq.direction, httpReq.method, httpReq.url)
             logContent = logContent .. "  Source: " .. (httpReq.source or "Unknown") .. "\n"
             logContent = logContent .. "  Script: " .. (httpReq.script or "Unknown") .. "\n"
-            if httpReq.headers and next(httpReq.headers) then
-                logContent = logContent .. "  Headers: " .. SafeJSONEncode(httpReq.headers) .. "\n"
-            end
-            if httpReq.data then
-                local dataStr = tostring(httpReq.data)
-                if #dataStr > 200 then
-                    dataStr = string.sub(dataStr, 1, 200) .. "... [TRUNCATED]"
+            
+            if httpReq.direction == "OUTGOING" then
+                logContent = logContent .. "  Request Size: " .. (httpReq.request_size or 0) .. " bytes\n"
+                if httpReq.headers and next(httpReq.headers) then
+                    logContent = logContent .. "  Request Headers: " .. SafeJSONEncode(httpReq.headers) .. "\n"
                 end
-                logContent = logContent .. "  Data: " .. dataStr .. "\n"
+                if httpReq.request_data and httpReq.request_data ~= "[LOGGING_DISABLED]" then
+                    logContent = logContent .. "  Request Data: " .. httpReq.request_data .. "\n"
+                end
+            elseif httpReq.direction == "INCOMING" then
+                logContent = logContent .. "  Response Size: " .. (httpReq.response_size or 0) .. " bytes\n"
+                if httpReq.response_data and httpReq.response_data ~= "[LOGGING_DISABLED]" then
+                    logContent = logContent .. "  Response Data: " .. httpReq.response_data .. "\n"
+                end
             end
             logContent = logContent .. "\n"
         end
         
-        logContent = logContent .. "TOP " .. CONFIG.MAX_REPORT_ACTIVITIES .. " MALICIOUS ACTIVITIES:\n"
+        logContent = logContent .. "\nTOP " .. CONFIG.MAX_REPORT_ACTIVITIES .. " MALICIOUS ACTIVITIES:\n"
         logContent = logContent .. "─────────────────────────────────────────────────────────────────────────────\n"
         local sortedActivities = SortMaliciousByRisk(MaliciousActivities)
         for i = 1, math.min(CONFIG.MAX_REPORT_ACTIVITIES, #sortedActivities) do
@@ -1420,7 +1546,7 @@ function ScriptTester:StartMonitoring()
     SafeCall(function()
         print("\n")
         print("╔══════════════════════════════════════════════════════════════════════════════╗")
-        print("║                               RUNTIME ANALYZER v2.1                         ║")
+        print("║                               RUNTIME ANALYZER v2.2                         ║")
         print("║                              morefein was here                              ║")
         print("╚══════════════════════════════════════════════════════════════════════════════╝")
         print("")
@@ -1430,6 +1556,8 @@ function ScriptTester:StartMonitoring()
         print("  Show Detections: " .. tostring(CONFIG.SHOW_DETECTIONS))
         print("  HTTP Spy Enabled: " .. tostring(CONFIG.HTTP_SPY_ENABLED))
         print("  Show All HTTP Requests: " .. tostring(CONFIG.SHOW_ALL_HTTP_REQUESTS))
+        print("  Log HTTP Data: " .. tostring(CONFIG.LOG_HTTP_DATA))
+        print("  Max Data Log Length: " .. CONFIG.MAX_DATA_LOG_LENGTH .. " chars")
         print("  Debug Mode: " .. tostring(CONFIG.DEBUG_MODE))
         print("")
         print("┌─ INITIALIZING HOOKS ─────────────────────────────────────────────────────────┐")
@@ -1449,6 +1577,7 @@ function ScriptTester:StartMonitoring()
         DataCollectionPatterns = {}
         BlockedScripts = {}
         HTTPSpyLog = {}
+        HTTPRequestCounter = 0
         
         MonitoringActive = true
         StartTime = tick()
@@ -1469,7 +1598,8 @@ function ScriptTester:StartMonitoring()
         print("┌─ MONITORING ACTIVE ──────────────────────────────────────────────────────────┐")
         print("│ ✅ All hooks installed successfully")
         print("│ 🟢 Runtime monitoring active")
-        print("│ 🌐 HTTP Spy monitoring active")
+        print("│ 🌐 HTTP Spy monitoring active (IN/OUT)")
+        print("│ 📊 Data logging enabled for requests/responses")
         if CONFIG.BLOCK_MALICIOUS_SCRIPTS then
             print("│ 🔴 Malicious scripts will be BLOCKED")
         else
@@ -1541,14 +1671,39 @@ function ScriptTester:StartMonitoring()
                     print("")
                     
                     if #HTTPSpyLog > 0 then
-                        print("HTTP SPY - TOP 10 REQUESTS:")
-                        for i = 1, math.min(10, #HTTPSpyLog) do
-                            local req = HTTPSpyLog[i]
-                            local urlDisplay = req.url
-                            if #urlDisplay > 80 then
-                                urlDisplay = string.sub(urlDisplay, 1, 80) .. "..."
+                        print("HTTP SPY - OUTGOING/INCOMING PAIRS:")
+                        local requestPairs = {}
+                        for _, req in pairs(HTTPSpyLog) do
+                            if not requestPairs[req.id] then
+                                requestPairs[req.id] = {}
                             end
-                            print(string.format("  [%d] %s -> %s", i, req.method, urlDisplay))
+                            table.insert(requestPairs[req.id], req)
+                        end
+                        
+                        local count = 0
+                        for id, pair in pairs(requestPairs) do
+                            if count >= 5 then break end
+                            count = count + 1
+                            local outgoing = nil
+                            local incoming = nil
+                            for _, req in pairs(pair) do
+                                if req.direction == "OUTGOING" then
+                                    outgoing = req
+                                elseif req.direction == "INCOMING" then
+                                    incoming = req
+                                end
+                            end
+                            
+                            if outgoing then
+                                local urlDisplay = outgoing.url
+                                if #urlDisplay > 60 then
+                                    urlDisplay = string.sub(urlDisplay, 1, 60) .. "..."
+                                end
+                                print(string.format("  [%d] OUT: %s -> %s [%db]", count, outgoing.method, urlDisplay, outgoing.request_size))
+                                if incoming then
+                                    print(string.format("      IN:  Response received [%db]", incoming.response_size))
+                                end
+                            end
                         end
                         print("")
                     end
