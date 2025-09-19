@@ -18,7 +18,9 @@ local CONFIG = {
     HTTP_SPY_ENABLED = true,
     SHOW_ALL_HTTP_REQUESTS = true,
     LOG_HTTP_DATA = true,
-    MAX_DATA_LOG_LENGTH = 1000
+    MAX_DATA_LOG_LENGTH = 1000,
+    SHOW_PACKET_DETAILS = true,
+    SHOW_HEX_DUMPS = true
 }
 
 local function SafeCall(func, description)
@@ -88,6 +90,26 @@ local function TruncateData(data, maxLength)
     return dataStr
 end
 
+local function ToHex(data, maxBytes)
+    if not data then return "nil" end
+    local dataStr = tostring(data)
+    local hex = ""
+    local limit = math.min(#dataStr, maxBytes or 200)
+    
+    for i = 1, limit do
+        hex = hex .. string.format("%02X ", string.byte(dataStr, i))
+        if i % 16 == 0 then
+            hex = hex .. "\n"
+        end
+    end
+    
+    if #dataStr > limit then
+        hex = hex .. "\n[... " .. (#dataStr - limit) .. " more bytes]"
+    end
+    
+    return hex
+end
+
 local ScriptTester = {}
 local Players = SafeGetService("Players")
 local RunService = SafeGetService("RunService")
@@ -95,6 +117,8 @@ local HttpService = SafeGetService("HttpService")
 local MarketplaceService = SafeGetService("MarketplaceService")
 local TeleportService = SafeGetService("TeleportService")
 local UserInputService = SafeGetService("UserInputService")
+local CoreGui = SafeGetService("CoreGui")
+local TweenService = SafeGetService("TweenService")
 
 local LocalPlayer = nil
 SafeCall(function()
@@ -120,6 +144,492 @@ local DataCollectionPatterns = {}
 local BlockedScripts = {}
 local HTTPSpyLog = {}
 local HTTPRequestCounter = 0
+
+local UI = {}
+UI.ScreenGui = nil
+UI.MainFrame = nil
+UI.RequestsList = nil
+UI.StatusLabel = nil
+
+local function CreateUI()
+    SafeCall(function()
+        if UI.ScreenGui then
+            UI.ScreenGui:Destroy()
+        end
+        
+        UI.ScreenGui = Instance.new("ScreenGui")
+        UI.ScreenGui.Name = "RuntimeAnalyzerGUI"
+        UI.ScreenGui.ResetOnSpawn = false
+        UI.ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+        
+        if gethui then
+            UI.ScreenGui.Parent = gethui()
+        elseif syn and syn.protect_gui then
+            syn.protect_gui(UI.ScreenGui)
+            UI.ScreenGui.Parent = CoreGui
+        else
+            UI.ScreenGui.Parent = CoreGui
+        end
+        
+        UI.MainFrame = Instance.new("Frame")
+        UI.MainFrame.Name = "MainFrame"
+        UI.MainFrame.Parent = UI.ScreenGui
+        UI.MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+        UI.MainFrame.BorderSizePixel = 0
+        UI.MainFrame.Position = UDim2.new(0, 50, 0, 50)
+        UI.MainFrame.Size = UDim2.new(0, 900, 0, 600)
+        UI.MainFrame.Active = true
+        UI.MainFrame.Draggable = true
+        
+        local Corner = Instance.new("UICorner")
+        Corner.CornerRadius = UDim.new(0, 8)
+        Corner.Parent = UI.MainFrame
+        
+        local Shadow = Instance.new("Frame")
+        Shadow.Name = "Shadow"
+        Shadow.Parent = UI.MainFrame
+        Shadow.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+        Shadow.BackgroundTransparency = 0.7
+        Shadow.BorderSizePixel = 0
+        Shadow.Position = UDim2.new(0, 4, 0, 4)
+        Shadow.Size = UDim2.new(1, 0, 1, 0)
+        Shadow.ZIndex = -1
+        
+        local ShadowCorner = Instance.new("UICorner")
+        ShadowCorner.CornerRadius = UDim.new(0, 8)
+        ShadowCorner.Parent = Shadow
+        
+        local TitleBar = Instance.new("Frame")
+        TitleBar.Name = "TitleBar"
+        TitleBar.Parent = UI.MainFrame
+        TitleBar.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+        TitleBar.BorderSizePixel = 0
+        TitleBar.Size = UDim2.new(1, 0, 0, 40)
+        
+        local TitleCorner = Instance.new("UICorner")
+        TitleCorner.CornerRadius = UDim.new(0, 8)
+        TitleCorner.Parent = TitleBar
+        
+        local TitleFix = Instance.new("Frame")
+        TitleFix.Parent = TitleBar
+        TitleFix.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+        TitleFix.BorderSizePixel = 0
+        TitleFix.Position = UDim2.new(0, 0, 0.5, 0)
+        TitleFix.Size = UDim2.new(1, 0, 0.5, 0)
+        
+        local TitleLabel = Instance.new("TextLabel")
+        TitleLabel.Name = "TitleLabel"
+        TitleLabel.Parent = TitleBar
+        TitleLabel.BackgroundTransparency = 1
+        TitleLabel.Position = UDim2.new(0, 15, 0, 0)
+        TitleLabel.Size = UDim2.new(1, -15, 1, 0)
+        TitleLabel.Font = Enum.Font.RobotoMono
+        TitleLabel.Text = "RUNTIME ANALYZER v2.2 - HTTP SPY"
+        TitleLabel.TextColor3 = Color3.fromRGB(0, 255, 127)
+        TitleLabel.TextSize = 16
+        TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+        
+        local CloseButton = Instance.new("TextButton")
+        CloseButton.Name = "CloseButton"
+        CloseButton.Parent = TitleBar
+        CloseButton.BackgroundColor3 = Color3.fromRGB(255, 85, 85)
+        CloseButton.BorderSizePixel = 0
+        CloseButton.Position = UDim2.new(1, -35, 0, 5)
+        CloseButton.Size = UDim2.new(0, 30, 0, 30)
+        CloseButton.Font = Enum.Font.RobotoMono
+        CloseButton.Text = "×"
+        CloseButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        CloseButton.TextSize = 18
+        
+        local CloseCorner = Instance.new("UICorner")
+        CloseCorner.CornerRadius = UDim.new(0, 4)
+        CloseCorner.Parent = CloseButton
+        
+        local StatusFrame = Instance.new("Frame")
+        StatusFrame.Name = "StatusFrame"
+        StatusFrame.Parent = UI.MainFrame
+        StatusFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+        StatusFrame.BorderSizePixel = 0
+        StatusFrame.Position = UDim2.new(0, 10, 0, 50)
+        StatusFrame.Size = UDim2.new(1, -20, 0, 80)
+        
+        local StatusCorner = Instance.new("UICorner")
+        StatusCorner.CornerRadius = UDim.new(0, 6)
+        StatusCorner.Parent = StatusFrame
+        
+        UI.StatusLabel = Instance.new("TextLabel")
+        UI.StatusLabel.Name = "StatusLabel"
+        UI.StatusLabel.Parent = StatusFrame
+        UI.StatusLabel.BackgroundTransparency = 1
+        UI.StatusLabel.Position = UDim2.new(0, 15, 0, 10)
+        UI.StatusLabel.Size = UDim2.new(1, -30, 0, 25)
+        UI.StatusLabel.Font = Enum.Font.RobotoMono
+        UI.StatusLabel.Text = "STATUS: MONITORING ACTIVE"
+        UI.StatusLabel.TextColor3 = Color3.fromRGB(0, 255, 127)
+        UI.StatusLabel.TextSize = 14
+        UI.StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+        
+        local RequestsLabel = Instance.new("TextLabel")
+        RequestsLabel.Name = "RequestsLabel"
+        RequestsLabel.Parent = StatusFrame
+        RequestsLabel.BackgroundTransparency = 1
+        RequestsLabel.Position = UDim2.new(0, 15, 0, 35)
+        RequestsLabel.Size = UDim2.new(1, -30, 0, 20)
+        RequestsLabel.Font = Enum.Font.RobotoMono
+        RequestsLabel.Text = "HTTP REQUESTS: 0 | DETECTIONS: 0"
+        RequestsLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+        RequestsLabel.TextSize = 12
+        RequestsLabel.TextXAlignment = Enum.TextXAlignment.Left
+        
+        local StopButton = Instance.new("TextButton")
+        StopButton.Name = "StopButton"
+        StopButton.Parent = StatusFrame
+        StopButton.BackgroundColor3 = Color3.fromRGB(255, 85, 85)
+        StopButton.BorderSizePixel = 0
+        StopButton.Position = UDim2.new(1, -100, 0, 10)
+        StopButton.Size = UDim2.new(0, 85, 0, 30)
+        StopButton.Font = Enum.Font.RobotoMono
+        StopButton.Text = "STOP"
+        StopButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        StopButton.TextSize = 14
+        
+        local StopCorner = Instance.new("UICorner")
+        StopCorner.CornerRadius = UDim.new(0, 4)
+        StopCorner.Parent = StopButton
+        
+        local ClearButton = Instance.new("TextButton")
+        ClearButton.Name = "ClearButton"
+        ClearButton.Parent = StatusFrame
+        ClearButton.BackgroundColor3 = Color3.fromRGB(85, 170, 255)
+        ClearButton.BorderSizePixel = 0
+        ClearButton.Position = UDim2.new(1, -200, 0, 10)
+        ClearButton.Size = UDim2.new(0, 85, 0, 30)
+        ClearButton.Font = Enum.Font.RobotoMono
+        ClearButton.Text = "CLEAR"
+        ClearButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        ClearButton.TextSize = 14
+        
+        local ClearCorner = Instance.new("UICorner")
+        ClearCorner.CornerRadius = UDim.new(0, 4)
+        ClearCorner.Parent = ClearButton
+        
+        local RequestsFrame = Instance.new("Frame")
+        RequestsFrame.Name = "RequestsFrame"
+        RequestsFrame.Parent = UI.MainFrame
+        RequestsFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+        RequestsFrame.BorderSizePixel = 0
+        RequestsFrame.Position = UDim2.new(0, 10, 0, 140)
+        RequestsFrame.Size = UDim2.new(1, -20, 1, -150)
+        
+        local RequestsCorner = Instance.new("UICorner")
+        RequestsCorner.CornerRadius = UDim.new(0, 6)
+        RequestsCorner.Parent = RequestsFrame
+        
+        local RequestsTitle = Instance.new("TextLabel")
+        RequestsTitle.Name = "RequestsTitle"
+        RequestsTitle.Parent = RequestsFrame
+        RequestsTitle.BackgroundTransparency = 1
+        RequestsTitle.Position = UDim2.new(0, 15, 0, 10)
+        RequestsTitle.Size = UDim2.new(1, -30, 0, 25)
+        RequestsTitle.Font = Enum.Font.RobotoMono
+        RequestsTitle.Text = "HTTP REQUESTS LOG"
+        RequestsTitle.TextColor3 = Color3.fromRGB(0, 255, 127)
+        RequestsTitle.TextSize = 14
+        RequestsTitle.TextXAlignment = Enum.TextXAlignment.Left
+        
+        UI.RequestsList = Instance.new("ScrollingFrame")
+        UI.RequestsList.Name = "RequestsList"
+        UI.RequestsList.Parent = RequestsFrame
+        UI.RequestsList.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+        UI.RequestsList.BorderSizePixel = 0
+        UI.RequestsList.Position = UDim2.new(0, 10, 0, 40)
+        UI.RequestsList.Size = UDim2.new(1, -20, 1, -50)
+        UI.RequestsList.ScrollBarThickness = 8
+        UI.RequestsList.ScrollBarImageColor3 = Color3.fromRGB(100, 100, 100)
+        UI.RequestsList.CanvasSize = UDim2.new(0, 0, 0, 0)
+        
+        local ListCorner = Instance.new("UICorner")
+        ListCorner.CornerRadius = UDim.new(0, 4)
+        ListCorner.Parent = UI.RequestsList
+        
+        local UIListLayout = Instance.new("UIListLayout")
+        UIListLayout.Parent = UI.RequestsList
+        UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+        UIListLayout.Padding = UDim.new(0, 5)
+        
+        CloseButton.MouseButton1Click:Connect(function()
+            UI.ScreenGui:Destroy()
+        end)
+        
+        StopButton.MouseButton1Click:Connect(function()
+            MonitoringActive = false
+            UI.StatusLabel.Text = "STATUS: MONITORING STOPPED"
+            UI.StatusLabel.TextColor3 = Color3.fromRGB(255, 85, 85)
+            StopButton.Text = "STOPPED"
+            StopButton.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+        end)
+        
+        ClearButton.MouseButton1Click:Connect(function()
+            for _, child in pairs(UI.RequestsList:GetChildren()) do
+                if child:IsA("Frame") then
+                    child:Destroy()
+                end
+            end
+            UI.RequestsList.CanvasSize = UDim2.new(0, 0, 0, 0)
+        end)
+        
+        spawn(function()
+            while UI.ScreenGui.Parent do
+                wait(1)
+                if UI.StatusLabel then
+                    local requestCount = #HTTPSpyLog
+                    local detectionCount = #MaliciousActivities
+                    RequestsLabel.Text = "HTTP REQUESTS: " .. requestCount .. " | DETECTIONS: " .. detectionCount
+                end
+            end
+        end)
+        
+    end, "Creating UI")
+end
+
+local function FormatRequestAsPython(httpData)
+    local headers = {}
+    for k, v in pairs(httpData.request_headers or {}) do
+        table.insert(headers, string.format("    '%s': '%s'", k, v))
+    end
+    local headersStr = "{\n" .. table.concat(headers, ",\n") .. "\n}"
+    
+    local dataStr = "None"
+    if httpData.request_data_raw and httpData.request_data_raw ~= "[LOGGING_DISABLED]" then
+        if httpData.contains_json then
+            dataStr = httpData.request_data_raw
+        else
+            dataStr = "'" .. httpData.request_data_raw:gsub("'", "\\'") .. "'"
+        end
+    end
+    
+    return string.format(
+        "import requests\n\nurl = '%s'\nheaders = %s\ndata = %s\n\nresponse = requests.%s(url, headers=headers%s)\nprint(response.text)",
+        httpData.url,
+        headersStr,
+        dataStr,
+        httpData.method:lower(),
+        dataStr ~= "None" and ", data=data" or ""
+    )
+end
+
+local function FormatRequestAsCurl(httpData)
+    local cmd = "curl -X " .. httpData.method
+    
+    for k, v in pairs(httpData.request_headers or {}) do
+        cmd = cmd .. string.format(" -H '%s: %s'", k, v)
+    end
+    
+    if httpData.request_data_raw and httpData.request_data_raw ~= "[LOGGING_DISABLED]" then
+        cmd = cmd .. " -d '" .. httpData.request_data_raw:gsub("'", "\\'") .. "'"
+    end
+    
+    cmd = cmd .. " '" .. httpData.url .. "'"
+    
+    return cmd
+end
+
+local function FormatRequestAsLua(httpData)
+    local headersStr = "{"
+    for k, v in pairs(httpData.request_headers or {}) do
+        headersStr = headersStr .. string.format('\n    ["%s"] = "%s",', k, v)
+    end
+    headersStr = headersStr .. "\n}"
+    
+    local requestStr = string.format(
+        'local HttpService = game:GetService("HttpService")\n\nlocal requestData = {\n    Url = "%s",\n    Method = "%s",\n    Headers = %s',
+        httpData.url,
+        httpData.method,
+        headersStr
+    )
+    
+    if httpData.request_data_raw and httpData.request_data_raw ~= "[LOGGING_DISABLED]" then
+        requestStr = requestStr .. ',\n    Body = "' .. httpData.request_data_raw:gsub('"', '\\"') .. '"'
+    end
+    
+    requestStr = requestStr .. "\n}\n\nlocal response = HttpService:RequestAsync(requestData)\nprint(response.Body)"
+    
+    return requestStr
+end
+
+local function FormatRequestAsJavaScript(httpData)
+    local headersStr = "{"
+    for k, v in pairs(httpData.request_headers or {}) do
+        headersStr = headersStr .. string.format('\n    "%s": "%s",', k, v)
+    end
+    headersStr = headersStr .. "\n}"
+    
+    local bodyStr = "null"
+    if httpData.request_data_raw and httpData.request_data_raw ~= "[LOGGING_DISABLED]" then
+        bodyStr = "'" .. httpData.request_data_raw:gsub("'", "\\'") .. "'"
+    end
+    
+    return string.format(
+        'fetch("%s", {\n    method: "%s",\n    headers: %s,\n    body: %s\n})\n.then(response => response.text())\n.then(data => console.log(data));',
+        httpData.url,
+        httpData.method,
+        headersStr,
+        bodyStr
+    )
+end
+
+local function CopyToClipboard(text)
+    if setclipboard then
+        setclipboard(text)
+        return true
+    elseif toclipboard then
+        toclipboard(text)
+        return true
+    end
+    return false
+end
+
+local function AddRequestToUI(httpData)
+    SafeCall(function()
+        if not UI.RequestsList or httpData.direction ~= "OUTGOING" then
+            return
+        end
+        
+        local RequestFrame = Instance.new("Frame")
+        RequestFrame.Name = "Request_" .. (httpData.id or "unknown")
+        RequestFrame.Parent = UI.RequestsList
+        RequestFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+        RequestFrame.BorderSizePixel = 0
+        RequestFrame.Size = UDim2.new(1, -10, 0, 120)
+        RequestFrame.LayoutOrder = -(httpData.id or 0)
+        
+        local RequestCorner = Instance.new("UICorner")
+        RequestCorner.CornerRadius = UDim.new(0, 4)
+        RequestCorner.Parent = RequestFrame
+        
+        local MethodLabel = Instance.new("TextLabel")
+        MethodLabel.Parent = RequestFrame
+        MethodLabel.BackgroundTransparency = 1
+        MethodLabel.Position = UDim2.new(0, 10, 0, 5)
+        MethodLabel.Size = UDim2.new(0, 80, 0, 20)
+        MethodLabel.Font = Enum.Font.RobotoMono
+        MethodLabel.Text = httpData.method
+        MethodLabel.TextColor3 = httpData.method == "POST" and Color3.fromRGB(255, 170, 85) or Color3.fromRGB(85, 170, 255)
+        MethodLabel.TextSize = 12
+        MethodLabel.TextXAlignment = Enum.TextXAlignment.Left
+        
+        local UrlLabel = Instance.new("TextLabel")
+        UrlLabel.Parent = RequestFrame
+        UrlLabel.BackgroundTransparency = 1
+        UrlLabel.Position = UDim2.new(0, 100, 0, 5)
+        UrlLabel.Size = UDim2.new(1, -110, 0, 20)
+        UrlLabel.Font = Enum.Font.RobotoMono
+        UrlLabel.Text = TruncateData(httpData.url, 60)
+        UrlLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+        UrlLabel.TextSize = 12
+        UrlLabel.TextXAlignment = Enum.TextXAlignment.Left
+        
+        local SizeLabel = Instance.new("TextLabel")
+        SizeLabel.Parent = RequestFrame
+        SizeLabel.BackgroundTransparency = 1
+        SizeLabel.Position = UDim2.new(0, 10, 0, 25)
+        SizeLabel.Size = UDim2.new(0, 200, 0, 15)
+        SizeLabel.Font = Enum.Font.RobotoMono
+        SizeLabel.Text = string.format("SIZE: %db | TIME: %.3fs", httpData.request_size or 0, httpData.timing and httpData.timing.duration or 0)
+        SizeLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+        SizeLabel.TextSize = 10
+        SizeLabel.TextXAlignment = Enum.TextXAlignment.Left
+        
+        local SecurityLabel = Instance.new("TextLabel")
+        SecurityLabel.Parent = RequestFrame
+        SecurityLabel.BackgroundTransparency = 1
+        SecurityLabel.Position = UDim2.new(0, 10, 0, 40)
+        SecurityLabel.Size = UDim2.new(1, -20, 0, 15)
+        SecurityLabel.Font = Enum.Font.RobotoMono
+        SecurityLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+        SecurityLabel.TextSize = 10
+        SecurityLabel.TextXAlignment = Enum.TextXAlignment.Left
+        
+        local securityFlags = {}
+        if httpData.is_webhook then table.insert(securityFlags, "WEBHOOK") end
+        if httpData.is_suspicious_domain then table.insert(securityFlags, "SUSPICIOUS") end
+        if httpData.contains_json then table.insert(securityFlags, "JSON") end
+        if httpData.contains_base64 then table.insert(securityFlags, "BASE64") end
+        SecurityLabel.Text = "FLAGS: " .. (next(securityFlags) and table.concat(securityFlags, " | ") or "NONE")
+        
+        local ButtonFrame = Instance.new("Frame")
+        ButtonFrame.Parent = RequestFrame
+        ButtonFrame.BackgroundTransparency = 1
+        ButtonFrame.Position = UDim2.new(0, 10, 0, 60)
+        ButtonFrame.Size = UDim2.new(1, -20, 0, 50)
+        
+        local buttons = {
+            {text = "PYTHON", color = Color3.fromRGB(85, 170, 255), formatter = FormatRequestAsPython},
+            {text = "CURL", color = Color3.fromRGB(255, 170, 85), formatter = FormatRequestAsCurl},
+            {text = "LUA", color = Color3.fromRGB(170, 85, 255), formatter = FormatRequestAsLua},
+            {text = "JS", color = Color3.fromRGB(255, 85, 170), formatter = FormatRequestAsJavaScript}
+        }
+        
+        for i, buttonData in ipairs(buttons) do
+            local CopyButton = Instance.new("TextButton")
+            CopyButton.Parent = ButtonFrame
+            CopyButton.BackgroundColor3 = buttonData.color
+            CopyButton.BorderSizePixel = 0
+            CopyButton.Position = UDim2.new(0, (i-1) * 70, 0, 0)
+            CopyButton.Size = UDim2.new(0, 65, 0, 25)
+            CopyButton.Font = Enum.Font.RobotoMono
+            CopyButton.Text = buttonData.text
+            CopyButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+            CopyButton.TextSize = 10
+            
+            local ButtonCorner = Instance.new("UICorner")
+            ButtonCorner.CornerRadius = UDim.new(0, 3)
+            ButtonCorner.Parent = CopyButton
+            
+            CopyButton.MouseButton1Click:Connect(function()
+                local formatted = buttonData.formatter(httpData)
+                local success = CopyToClipboard(formatted)
+                
+                CopyButton.Text = success and "COPIED!" or "NO CLIP"
+                CopyButton.BackgroundColor3 = success and Color3.fromRGB(85, 255, 85) or Color3.fromRGB(255, 85, 85)
+                
+                wait(1)
+                CopyButton.Text = buttonData.text
+                CopyButton.BackgroundColor3 = buttonData.color
+            end)
+        end
+        
+        local RawButton = Instance.new("TextButton")
+        RawButton.Parent = ButtonFrame
+        RawButton.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+        RawButton.BorderSizePixel = 0
+        RawButton.Position = UDim2.new(0, 280, 0, 0)
+        RawButton.Size = UDim2.new(0, 65, 0, 25)
+        RawButton.Font = Enum.Font.RobotoMono
+        RawButton.Text = "RAW"
+        RawButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        RawButton.TextSize = 10
+        
+        local RawCorner = Instance.new("UICorner")
+        RawCorner.CornerRadius = UDim.new(0, 3)
+        RawCorner.Parent = RawButton
+        
+        RawButton.MouseButton1Click:Connect(function()
+            local rawData = SafeJSONEncode(httpData)
+            local success = CopyToClipboard(rawData)
+            
+            RawButton.Text = success and "COPIED!" or "NO CLIP"
+            RawButton.BackgroundColor3 = success and Color3.fromRGB(85, 255, 85) or Color3.fromRGB(255, 85, 85)
+            
+            wait(1)
+            RawButton.Text = "RAW"
+            RawButton.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+        end)
+        
+        UI.RequestsList.CanvasSize = UDim2.new(0, 0, 0, UI.RequestsList.UIListLayout.AbsoluteContentSize.Y + 10)
+        
+    end, "Adding request to UI")
+end
 
 local function IsExecutorScript()
     if not CONFIG.MONITOR_EXECUTOR_ONLY then
@@ -172,7 +682,7 @@ local function ShouldBlockActivity(activityType, severity)
     return severity >= 9
 end
 
-local function LogHTTPRequest(direction, method, url, requestData, responseData, headers, source, requestId)
+local function LogHTTPRequest(direction, method, url, requestData, responseData, headers, source, requestId, args, responseCode, responseHeaders, timing)
     SafeCall(function()
         if not MonitoringActive or not CONFIG.HTTP_SPY_ENABLED then 
             return 
@@ -184,40 +694,205 @@ local function LogHTTPRequest(direction, method, url, requestData, responseData,
         
         local scriptStr = success and tostring(callingScript) or "Unknown"
         
+        local requestSize = 0
+        local responseSize = 0
+        local requestDataHex = nil
+        local responseDataHex = nil
+        
+        if requestData then
+            requestSize = #tostring(requestData)
+            if CONFIG.LOG_HTTP_DATA and CONFIG.SHOW_HEX_DUMPS then
+                requestDataHex = ToHex(requestData, 500)
+            end
+        end
+        
+        if responseData then
+            responseSize = #tostring(responseData)
+            if CONFIG.LOG_HTTP_DATA and CONFIG.SHOW_HEX_DUMPS then
+                responseDataHex = ToHex(responseData, 500)
+            end
+        end
+        
+        local urlParts = {}
+        SafeCall(function()
+            local urlStr = tostring(url)
+            urlParts.full_url = urlStr
+            urlParts.protocol = urlStr:match("^([^:]+)://") or "unknown"
+            urlParts.domain = urlStr:match("://([^/]+)") or "unknown"
+            urlParts.path = urlStr:match("://[^/]+(.*)") or "/"
+            urlParts.port = urlStr:match(":(%d+)") or (urlParts.protocol == "https" and "443" or "80")
+        end, "Parsing URL components")
+        
         local httpData = {
             id = requestId or HTTPRequestCounter,
             method = method,
             url = url,
-            request_data = CONFIG.LOG_HTTP_DATA and TruncateData(requestData, CONFIG.MAX_DATA_LOG_LENGTH) or "[LOGGING_DISABLED]",
-            response_data = CONFIG.LOG_HTTP_DATA and TruncateData(responseData, CONFIG.MAX_DATA_LOG_LENGTH) or "[LOGGING_DISABLED]",
-            headers = headers,
+            url_components = urlParts,
+            request_data_raw = CONFIG.LOG_HTTP_DATA and TruncateData(requestData, CONFIG.MAX_DATA_LOG_LENGTH) or "[LOGGING_DISABLED]",
+            response_data_raw = CONFIG.LOG_HTTP_DATA and TruncateData(responseData, CONFIG.MAX_DATA_LOG_LENGTH) or "[LOGGING_DISABLED]",
+            request_data_hex = requestDataHex,
+            response_data_hex = responseDataHex,
+            request_headers = headers or {},
+            response_headers = responseHeaders or {},
+            headers_count = headers and (function() local c = 0; for _ in pairs(headers) do c = c + 1 end; return c end)() or 0,
+            function_arguments = args and SafeCall(function()
+                local argDetails = {}
+                for i, arg in pairs(args) do
+                    argDetails[i] = {
+                        type = type(arg),
+                        value = TruncateData(tostring(arg), 200),
+                        size = #tostring(arg)
+                    }
+                end
+                return argDetails
+            end, "Processing function arguments") or {},
             source = source,
             timestamp = tick() - StartTime,
             script = scriptStr,
             direction = direction,
-            request_size = requestData and #tostring(requestData) or 0,
-            response_size = responseData and #tostring(responseData) or 0
+            request_size = requestSize,
+            response_size = responseSize,
+            response_code = responseCode,
+            timing = timing or {
+                start_time = tick(),
+                end_time = tick(),
+                duration = 0
+            },
+            content_type = headers and (headers["Content-Type"] or headers["content-type"]) or "unknown",
+            user_agent = headers and (headers["User-Agent"] or headers["user-agent"]) or "unknown",
+            is_webhook = tostring(url):lower():find("webhook") and true or false,
+            is_discord = tostring(url):lower():find("discord") and true or false,
+            is_suspicious_domain = false,
+            contains_json = (requestData and tostring(requestData):find("[{%[]")) and true or false,
+            contains_base64 = (requestData and tostring(requestData):match("[A-Za-z0-9+/]+=*$")) and true or false,
+            contains_urls = (requestData and tostring(requestData):find("http")) and true or false
         }
+        
+        SafeCall(function()
+            local suspiciousDomains = {
+                "paste%.ee", "pastebin%.com", "hastebin%.com", "0x0%.st", "file%.io",
+                "anonfiles%.com", "mega%.nz", "t%.me", "api%.telegram%.org"
+            }
+            for _, domain in pairs(suspiciousDomains) do
+                if tostring(url):lower():find(domain) then
+                    httpData.is_suspicious_domain = true
+                    httpData.suspicious_domain_pattern = domain
+                    break
+                end
+            end
+        end, "Checking suspicious domains")
         
         table.insert(HTTPSpyLog, httpData)
         
+        if direction == "OUTGOING" then
+            AddRequestToUI(httpData)
+        end
+        
         if CONFIG.SHOW_ALL_HTTP_REQUESTS then
             local urlStr = tostring(url)
-            if #urlStr > 80 then
-                urlStr = string.sub(urlStr, 1, 80) .. "..."
+            if #urlStr > 60 then
+                urlStr = string.sub(urlStr, 1, 60) .. "..."
             end
             
             local dataInfo = ""
+            local securityFlags = ""
+            
             if requestData and direction == "OUTGOING" then
-                dataInfo = " [REQ:" .. #tostring(requestData) .. "b]"
+                dataInfo = " [REQ:" .. requestSize .. "b"
+                if httpData.contains_json then dataInfo = dataInfo .. ",JSON" end
+                if httpData.contains_base64 then dataInfo = dataInfo .. ",B64" end
+                dataInfo = dataInfo .. "]"
             elseif responseData and direction == "INCOMING" then
-                dataInfo = " [RESP:" .. #tostring(responseData) .. "b]"
+                dataInfo = " [RESP:" .. responseSize .. "b"
+                if responseCode then dataInfo = dataInfo .. ",CODE:" .. responseCode end
+                dataInfo = dataInfo .. "]"
             end
             
-            print("[HTTP-SPY] [" .. direction .. "] " .. method .. " -> " .. urlStr .. dataInfo)
+            if httpData.is_webhook then securityFlags = securityFlags .. "[WEBHOOK]" end
+            if httpData.is_suspicious_domain then securityFlags = securityFlags .. "[SUSPICIOUS]" end
+            
+            print("╔══════════════════════════════════════════════════════════════════════════════╗")
+            print("║ [HTTP-SPY] [" .. direction .. "] " .. method .. " -> " .. tostring(url))
+            print("╠──────────────────────────────────────────────────────────────────────────────╢")
+            print("║ Request ID: " .. (httpData.id or "UNKNOWN"))
+            print("║ Source: " .. (httpData.source or "Unknown"))
+            print("║ Script: " .. scriptStr)
+            print("║ Domain: " .. urlParts.domain)
+            print("║ Protocol: " .. urlParts.protocol .. " | Port: " .. urlParts.port)
+            print("║ Path: " .. urlParts.path)
+            
+            if direction == "OUTGOING" then
+                print("║ ")
+                print("║ ┌─ OUTGOING REQUEST DATA ─────────────────────────────────────────────────")
+                if args and #args > 0 then
+                    print("║ │ Function Arguments (" .. #args .. "):")
+                    for i, arg in pairs(args) do
+                        local argStr = TruncateData(tostring(arg), 80)
+                        print("║ │   [" .. i .. "] " .. type(arg) .. ": " .. argStr)
+                    end
+                end
+                
+                if headers and next(headers) then
+                    print("║ │ Request Headers (" .. httpData.headers_count .. "):")
+                    for k, v in pairs(headers) do
+                        print("║ │   " .. tostring(k) .. ": " .. tostring(v))
+                    end
+                end
+                
+                if requestData then
+                    print("║ │ Request Body (" .. requestSize .. " bytes):")
+                    local truncated = TruncateData(requestData, 200)
+                    print("║ │   " .. truncated)
+                    
+                    if CONFIG.SHOW_HEX_DUMPS and requestDataHex then
+                        print("║ │ Hex Dump:")
+                        for line in requestDataHex:gmatch("[^\r\n]+") do
+                            print("║ │   " .. line)
+                        end
+                    end
+                end
+                print("║ └─────────────────────────────────────────────────────────────────────────")
+            else
+                print("║ ")
+                print("║ ┌─ INCOMING RESPONSE DATA ────────────────────────────────────────────────")
+                if responseCode then
+                    print("║ │ Response Code: " .. responseCode)
+                end
+                
+                if responseHeaders and next(responseHeaders) then
+                    print("║ │ Response Headers:")
+                    for k, v in pairs(responseHeaders) do
+                        print("║ │   " .. tostring(k) .. ": " .. tostring(v))
+                    end
+                end
+                
+                if responseData then
+                    print("║ │ Response Body (" .. responseSize .. " bytes):")
+                    local truncated = TruncateData(responseData, 200)
+                    print("║ │   " .. truncated)
+                    
+                    if CONFIG.SHOW_HEX_DUMPS and responseDataHex then
+                        print("║ │ Hex Dump:")
+                        for line in responseDataHex:gmatch("[^\r\n]+") do
+                            print("║ │   " .. line)
+                        end
+                    end
+                end
+                
+                if timing and timing.duration then
+                    print("║ │ Request Duration: " .. string.format("%.3f", timing.duration) .. "s")
+                end
+                print("║ └─────────────────────────────────────────────────────────────────────────")
+            end
+            
+            if securityFlags ~= "" then
+                print("║ ⚠️  SECURITY FLAGS: " .. securityFlags)
+            end
+            print("╚══════════════════════════════════════════════════════════════════════════════╝")
+            print("")
         end
         
-        debugPrint("HTTP " .. direction .. " logged: " .. method .. " to " .. tostring(url), "INFO")
+        debugPrint("HTTP " .. direction .. " logged: " .. method .. " to " .. tostring(url) .. " (" .. (requestSize + responseSize) .. " bytes total)", "INFO")
     end, "HTTP request logging")
 end
 
@@ -346,13 +1021,19 @@ local function SetupGameServiceHooks()
                         local url = args[1]
                         HTTPRequestCounter = HTTPRequestCounter + 1
                         local requestId = HTTPRequestCounter
+                        local startTime = tick()
                         
                         LogActivity("LEGACY_HTTP_GET", "URL: " .. tostring(url), 5)
-                        LogHTTPRequest("OUTGOING", "LEGACY_GET", url, nil, nil, nil, "game.HttpGet", requestId)
+                        LogHTTPRequest("OUTGOING", "LEGACY_GET", url, nil, nil, nil, "game.HttpGet", requestId, args, nil, nil, {start_time = startTime})
                         
                         local result = originalNamecall(self, unpack(args))
+                        local endTime = tick()
                         
-                        LogHTTPRequest("INCOMING", "LEGACY_GET", url, nil, result, nil, "game.HttpGet", requestId)
+                        LogHTTPRequest("INCOMING", "LEGACY_GET", url, nil, result, nil, "game.HttpGet", requestId, args, 200, {}, {
+                            start_time = startTime,
+                            end_time = endTime,
+                            duration = endTime - startTime
+                        })
                         
                         table.insert(NetworkRequests, {
                             method = "Legacy_HttpGet",
@@ -369,13 +1050,19 @@ local function SetupGameServiceHooks()
                         local data = args[2]
                         HTTPRequestCounter = HTTPRequestCounter + 1
                         local requestId = HTTPRequestCounter
+                        local startTime = tick()
                         
                         LogActivity("LEGACY_HTTP_POST", "URL: " .. tostring(url), 6)
-                        LogHTTPRequest("OUTGOING", "LEGACY_POST", url, data, nil, nil, "game.HttpPost", requestId)
+                        LogHTTPRequest("OUTGOING", "LEGACY_POST", url, data, nil, nil, "game.HttpPost", requestId, args, nil, nil, {start_time = startTime})
                         
-                         local result = originalNamecall(self, unpack(args))
+                        local result = originalNamecall(self, unpack(args))
+                        local endTime = tick()
                         
-                        LogHTTPRequest("INCOMING", "LEGACY_POST", url, data, result, nil, "game.HttpPost", requestId)
+                        LogHTTPRequest("INCOMING", "LEGACY_POST", url, data, result, nil, "game.HttpPost", requestId, args, 200, {}, {
+                            start_time = startTime,
+                            end_time = endTime,
+                            duration = endTime - startTime
+                        })
                         
                         table.insert(NetworkRequests, {
                             method = "Legacy_HttpPost",
@@ -445,22 +1132,42 @@ local function SetupHttpServiceHooks()
                         local headers = args[3]
                         HTTPRequestCounter = HTTPRequestCounter + 1
                         local requestId = HTTPRequestCounter
+                        local startTime = tick()
                         
                         LogActivity("HTTP_POST", "URL: " .. tostring(url), 4)
-                        LogHTTPRequest("OUTGOING", "POST", url, data, nil, headers, "HttpService.PostAsync", requestId)
+                        LogHTTPRequest("OUTGOING", "POST", url, data, nil, headers, "HttpService.PostAsync", requestId, args, nil, nil, {start_time = startTime})
                         
                         local result = originalNamecall(self, unpack(args))
+                        local endTime = tick()
                         
-                        LogHTTPRequest("INCOMING", "POST", url, data, result, headers, "HttpService.PostAsync", requestId)
+                        local responseCode = nil
+                        local responseHeaders = {}
+                        if type(result) == "table" then
+                            responseCode = result.StatusCode or result.status_code
+                            responseHeaders = result.Headers or result.headers or {}
+                        end
+                        
+                        LogHTTPRequest("INCOMING", "POST", url, data, result, headers, "HttpService.PostAsync", requestId, args, responseCode, responseHeaders, {
+                            start_time = startTime,
+                            end_time = endTime,
+                            duration = endTime - startTime
+                        })
                         
                         table.insert(NetworkRequests, {
                             method = "PostAsync",
                             url = url,
                             data = data,
                             headers = headers,
+                            response = result,
+                            response_code = responseCode,
                             timestamp = tick() - StartTime,
+                            duration = endTime - startTime,
                             script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown"),
-                            args = args
+                            args = args,
+                            packet_sizes = {
+                                request = data and #tostring(data) or 0,
+                                response = result and #tostring(result) or 0
+                            }
                         })
                         
                         AnalyzeNetworkRequest("PostAsync", url, data)
@@ -470,21 +1177,33 @@ local function SetupHttpServiceHooks()
                         local headers = args[2]
                         HTTPRequestCounter = HTTPRequestCounter + 1
                         local requestId = HTTPRequestCounter
+                        local startTime = tick()
                         
                         LogActivity("HTTP_GET", "URL: " .. tostring(url), 3)
-                        LogHTTPRequest("OUTGOING", "GET", url, nil, nil, headers, "HttpService.GetAsync", requestId)
+                        LogHTTPRequest("OUTGOING", "GET", url, nil, nil, headers, "HttpService.GetAsync", requestId, args, nil, nil, {start_time = startTime})
                         
-                         local result = originalNamecall(self, unpack(args))
+                        local result = originalNamecall(self, unpack(args))
+                        local endTime = tick()
                         
-                        LogHTTPRequest("INCOMING", "GET", url, nil, result, headers, "HttpService.GetAsync", requestId)
+                        LogHTTPRequest("INCOMING", "GET", url, nil, result, headers, "HttpService.GetAsync", requestId, args, 200, {}, {
+                            start_time = startTime,
+                            end_time = endTime,
+                            duration = endTime - startTime
+                        })
                         
                         table.insert(NetworkRequests, {
                             method = "GetAsync",
                             url = url,
                             headers = headers,
+                            response = result,
                             timestamp = tick() - StartTime,
+                            duration = endTime - startTime,
                             script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown"),
-                            args = args
+                            args = args,
+                            packet_sizes = {
+                                request = 0,
+                                response = result and #tostring(result) or 0
+                            }
                         })
                         
                         AnalyzeNetworkRequest("GetAsync", url, nil)
@@ -497,26 +1216,43 @@ local function SetupHttpServiceHooks()
                         local body = requestData and (requestData.Body or requestData.body) or nil
                         HTTPRequestCounter = HTTPRequestCounter + 1
                         local requestId = HTTPRequestCounter
+                        local startTime = tick()
                         
                         LogActivity("HTTP_REQUEST", reqMethod .. " -> " .. tostring(url), 4)
-                        LogHTTPRequest("OUTGOING", reqMethod, url, body, nil, headers, "HttpService.RequestAsync", requestId)
+                        LogHTTPRequest("OUTGOING", reqMethod, url, body, nil, headers, "HttpService.RequestAsync", requestId, args, nil, nil, {start_time = startTime})
                         
                         local result = originalNamecall(self, unpack(args))
+                        local endTime = tick()
                         
                         local responseBody = nil
-                        if result and type(result) == "table" and result.Body then
+                        local responseCode = nil
+                        local responseHeaders = {}
+                        if result and type(result) == "table" then
                             responseBody = result.Body
+                            responseCode = result.StatusCode
+                            responseHeaders = result.Headers or {}
                         end
                         
-                        LogHTTPRequest("INCOMING", reqMethod, url, body, responseBody, headers, "HttpService.RequestAsync", requestId)
+                        LogHTTPRequest("INCOMING", reqMethod, url, body, responseBody, headers, "HttpService.RequestAsync", requestId, args, responseCode, responseHeaders, {
+                            start_time = startTime,
+                            end_time = endTime,
+                            duration = endTime - startTime
+                        })
                         
                         table.insert(NetworkRequests, {
                             method = "RequestAsync_" .. reqMethod,
                             url = url,
                             data = requestData,
+                            response = result,
+                            response_code = responseCode,
                             timestamp = tick() - StartTime,
+                            duration = endTime - startTime,
                             script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown"),
-                            args = args
+                            args = args,
+                            packet_sizes = {
+                                request = body and #tostring(body) or 0,
+                                response = responseBody and #tostring(responseBody) or 0
+                            }
                         })
                         
                         AnalyzeNetworkRequest("RequestAsync", url, body)
@@ -908,6 +1644,7 @@ local function SetupRequestHooks()
                             local body = nil
                             HTTPRequestCounter = HTTPRequestCounter + 1
                             local requestId = HTTPRequestCounter
+                            local startTime = tick()
                             
                             SafeCall(function()
                                 url = requestData.Url or requestData.url or "Unknown"
@@ -916,14 +1653,17 @@ local function SetupRequestHooks()
                                 body = requestData.Body or requestData.body
                                 
                                 LogActivity("REQUEST_FUNCTION", method .. " -> " .. tostring(url), 4)
-                                LogHTTPRequest("OUTGOING", method, url, body, nil, headers, "request()", requestId)
+                                LogHTTPRequest("OUTGOING", method, url, body, nil, headers, "request()", requestId, {requestData}, nil, nil, {start_time = startTime})
                                 
                                 table.insert(NetworkRequests, {
                                     method = "request_" .. method,
                                     url = url,
                                     data = requestData,
                                     timestamp = tick() - StartTime,
-                                    script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown")
+                                    script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown"),
+                                    packet_sizes = {
+                                        request = body and #tostring(body) or 0
+                                    }
                                 })
                                 
                                 AnalyzeNetworkRequest("request", url, body)
@@ -931,14 +1671,24 @@ local function SetupRequestHooks()
                         end
                         
                         local result = OriginalFunctions.request(requestData)
+                        local endTime = tick()
                         
                         if IsExecutorScript() then
                             SafeCall(function()
                                 local responseBody = nil
-                                if result and type(result) == "table" and result.Body then
+                                local responseCode = nil
+                                local responseHeaders = {}
+                                if result and type(result) == "table" then
                                     responseBody = result.Body
+                                    responseCode = result.StatusCode
+                                    responseHeaders = result.Headers or {}
                                 end
-                                LogHTTPRequest("INCOMING", method, url, body, responseBody, headers, "request()", requestId)
+                                
+                                LogHTTPRequest("INCOMING", method, url, body, responseBody, headers, "request()", requestId, {requestData}, responseCode, responseHeaders, {
+                                    start_time = startTime,
+                                    end_time = endTime,
+                                    duration = endTime - startTime
+                                })
                             end, "Request response logging")
                         end
                         
@@ -960,6 +1710,7 @@ local function SetupRequestHooks()
                             local body = nil
                             HTTPRequestCounter = HTTPRequestCounter + 1
                             local requestId = HTTPRequestCounter
+                            local startTime = tick()
                             
                             SafeCall(function()
                                 url = requestData.Url or requestData.url or "Unknown"
@@ -968,14 +1719,17 @@ local function SetupRequestHooks()
                                 body = requestData.Body or requestData.body
                                 
                                 LogActivity("HTTP_REQUEST_FUNCTION", method .. " -> " .. tostring(url), 4)
-                                LogHTTPRequest("OUTGOING", method, url, body, nil, headers, "http_request()", requestId)
+                                LogHTTPRequest("OUTGOING", method, url, body, nil, headers, "http_request()", requestId, {requestData}, nil, nil, {start_time = startTime})
                                 
                                 table.insert(NetworkRequests, {
                                     method = "http_request_" .. method,
                                     url = url,
                                     data = requestData,
                                     timestamp = tick() - StartTime,
-                                    script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown")
+                                    script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown"),
+                                    packet_sizes = {
+                                        request = body and #tostring(body) or 0
+                                    }
                                 })
                                 
                                 AnalyzeNetworkRequest("http_request", url, body)
@@ -983,14 +1737,24 @@ local function SetupRequestHooks()
                         end
                         
                         local result = OriginalFunctions.http_request(requestData)
+                        local endTime = tick()
                         
                         if IsExecutorScript() then
                             SafeCall(function()
                                 local responseBody = nil
-                                if result and type(result) == "table" and result.Body then
+                                local responseCode = nil
+                                local responseHeaders = {}
+                                if result and type(result) == "table" then
                                     responseBody = result.Body
+                                    responseCode = result.StatusCode
+                                    responseHeaders = result.Headers or {}
                                 end
-                                LogHTTPRequest("INCOMING", method, url, body, responseBody, headers, "http_request()", requestId)
+                                
+                                LogHTTPRequest("INCOMING", method, url, body, responseBody, headers, "http_request()", requestId, {requestData}, responseCode, responseHeaders, {
+                                    start_time = startTime,
+                                    end_time = endTime,
+                                    duration = endTime - startTime
+                                })
                             end, "HTTP request response logging")
                         end
                         
@@ -998,56 +1762,6 @@ local function SetupRequestHooks()
                     end
                 end
             end, "Setting up http_request hook")
-        end
-        
-        if syn and syn.request then
-            SafeCall(function()
-                OriginalFunctions.syn_request = syn.request
-                syn.request = function(requestData)
-                    if IsExecutorScript() then
-                        local url = "Unknown"
-                        local method = "GET"
-                        local headers = {}
-                        local body = nil
-                        HTTPRequestCounter = HTTPRequestCounter + 1
-                        local requestId = HTTPRequestCounter
-                        
-                        SafeCall(function()
-                            url = requestData.Url or requestData.url or "Unknown"
-                            method = requestData.Method or requestData.method or "GET"
-                            headers = requestData.Headers or requestData.headers or {}
-                            body = requestData.Body or requestData.body
-                            
-                            LogActivity("SYN_REQUEST", method .. " -> " .. tostring(url), 4)
-                            LogHTTPRequest("OUTGOING", method, url, body, nil, headers, "syn.request()", requestId)
-                            
-                            table.insert(NetworkRequests, {
-                                method = "syn_request_" .. method,
-                                url = url,
-                                data = requestData,
-                                timestamp = tick() - StartTime,
-                                script = tostring(SafeCall(function() return getcallingscript() end) and getcallingscript() or "Unknown")
-                            })
-                            
-                            AnalyzeNetworkRequest("syn_request", url, body)
-                        end, "Syn request logging")
-                    end
-                    
-                    local result = OriginalFunctions.syn_request(requestData)
-                    
-                    if IsExecutorScript() then
-                        SafeCall(function()
-                            local responseBody = nil
-                            if result and type(result) == "table" and result.Body then
-                                responseBody = result.Body
-                            end
-                            LogHTTPRequest("INCOMING", method, url, body, responseBody, headers, "syn.request()", requestId)
-                        end, "Syn request response logging")
-                    end
-                    
-                    return result
-                end
-            end, "Setting up syn.request hook")
         end
         
         debugPrint("Request hooks installed", "INFO")
@@ -1552,6 +2266,8 @@ function ScriptTester:StartMonitoring()
         print("  Log HTTP Data: " .. tostring(CONFIG.LOG_HTTP_DATA))
         print("  Max Data Log Length: " .. CONFIG.MAX_DATA_LOG_LENGTH .. " chars")
         print("  Debug Mode: " .. tostring(CONFIG.DEBUG_MODE))
+        print("  Show Packet Details: " .. tostring(CONFIG.SHOW_PACKET_DETAILS))
+        print("  Show Hex Dumps: " .. tostring(CONFIG.SHOW_HEX_DUMPS))
         print("")
         print("┌─ INITIALIZING HOOKS ─────────────────────────────────────────────────────────┐")
         print("│ Setting up monitoring systems...")
@@ -1577,6 +2293,8 @@ function ScriptTester:StartMonitoring()
         
         debugPrint("Starting hook installation", "INFO")
         
+        CreateUI()
+        
         SetupGameServiceHooks()
         SetupHttpServiceHooks()
         SetupMarketplaceHooks()
@@ -1592,7 +2310,10 @@ function ScriptTester:StartMonitoring()
         print("│ ✅ All hooks installed successfully")
         print("│ 🟢 Runtime monitoring active")
         print("│ 🌐 HTTP Spy monitoring active (IN/OUT)")
-        print("│ 📊 Data logging enabled for requests/responses")
+        print("│ 📊 Enhanced packet analysis enabled")
+        print("│ 🔍 Hex dump analysis enabled")
+        print("│ 📋 Detailed argument logging enabled")
+        print("│ 🖥️  GUI interface available")
         if CONFIG.BLOCK_MALICIOUS_SCRIPTS then
             print("│ 🔴 Malicious scripts will be BLOCKED")
         else
@@ -1613,6 +2334,10 @@ function ScriptTester:StartMonitoring()
                     MonitoringActive = false
                     debugPrint("Monitoring timeout reached", "INFO")
                     print("Monitoring timeout reached")
+                    if UI.StatusLabel then
+                        UI.StatusLabel.Text = "STATUS: MONITORING TIMEOUT"
+                        UI.StatusLabel.TextColor3 = Color3.fromRGB(255, 170, 85)
+                    end
                 end
                 
                 local riskScore = CalculateRiskScore()
